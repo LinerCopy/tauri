@@ -146,7 +146,11 @@ bool TlsClient::connect(const ParsedUrl& url, TlsConnection& out, std::string& e
 
     // Просим OpenSSL валидировать пир, но решение принимаем сами — нам нужны
     // и chain_ok=false случаи с детальной диагностикой.
-    SSL_CTX_set_verify(out.ctx.get(), SSL_VERIFY_PEER, nullptr);
+    // Callback всегда возвращает 1 (OK) — handshake НЕ прерывается при ошибке
+    // верификации. Реальный результат проверки читается через
+    // SSL_get_verify_result() после хендшейка и передаётся в JSON-ответ.
+    SSL_CTX_set_verify(out.ctx.get(), SSL_VERIFY_PEER,
+        [](int /*preverify_ok*/, X509_STORE_CTX* /*ctx*/) -> int { return 1; });
 
     if (!load_trust_store(out.ctx.get(), error)) {
         return false;

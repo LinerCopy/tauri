@@ -99,8 +99,8 @@ jobs:
         run: |
           set -euo pipefail
           ROOT="${GITHUB_WORKSPACE}/third_party/openssl/install"
-          OUT="${ROOT}/OpenSSL.xcframework"
-          rm -rf "${OUT}"
+          # Удаляем предыдущие xcframeworks (из кеша) чтобы xcodebuild не падал
+          rm -rf "${ROOT}"/*.xcframework
           # Сначала ssl, затем crypto — отдельные xcframework на библиотеку.
           for lib in ssl crypto; do
             xcodebuild -create-xcframework \
