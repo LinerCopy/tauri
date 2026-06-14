@@ -245,6 +245,22 @@ const char* inspect_url(const char* request_json) {
             code = "CONNECTION_REFUSED";
             user_msg = "Сервер отклонил подключение на порту 443.";
         }
+        // ГОСТ TLS — нет общих шифров
+        else if (err.find("no shared cipher") != std::string::npos ||
+                 err.find("no ciphers available") != std::string::npos ||
+                 err.find("no protocols available") != std::string::npos ||
+                 err.find("sslv3 alert handshake failure") != std::string::npos) {
+#ifdef GCI_GOST_ENABLED
+            code = "TLS_CIPHER_MISMATCH";
+            user_msg = "Не удалось согласовать шифр с сервером. "
+                       "Сайт может использовать нестандартную конфигурацию TLS.";
+#else
+            code = "GOST_UNSUPPORTED";
+            user_msg = "Сайт использует ГОСТ-шифрование (российский стандарт). "
+                       "Поддержка ГОСТ включена — если ошибка повторяется, "
+                       "возможно сервер требует особую конфигурацию TLS.";
+#endif
+        }
 
         json out = json::parse(build_error_response(request_id, input_url, code, user_msg));
         out["resolvedHost"] = parsed.host;

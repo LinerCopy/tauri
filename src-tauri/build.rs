@@ -88,6 +88,7 @@ fn build_cpp_core() {
     println!("cargo:rerun-if-env-changed=OPENSSL_LIB_DIR");
     println!("cargo:rerun-if-env-changed=OPENSSL_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=GCI_SKIP_NATIVE");
+    println!("cargo:rerun-if-env-changed=GOST_ENGINE_ROOT");
 
     // ----- Resolve OpenSSL paths -------------------------------------------
     // Priority:
@@ -138,6 +139,17 @@ fn build_cpp_core() {
         );
     }
 
+    // ----- GOST engine (optional) -------------------------------------------
+    let gost_root = resolve_gost_engine_root(&target, &manifest_dir);
+    if let Some(gost) = gost_root.as_ref() {
+        cfg.define("GCI_ENABLE_GOST", "ON");
+        cfg.define("GOST_ENGINE_ROOT", gost.to_string_lossy().as_ref());
+        println!(
+            "cargo:warning=gci-app: GOST engine enabled from {}",
+            gost.display()
+        );
+    }
+
     // `Config::build()` with a custom build_target returns OUT_DIR; the
     // actual cmake build tree lives under `<OUT_DIR>/build`.
     let out_dir = cfg.build();
@@ -161,6 +173,23 @@ fn build_cpp_core() {
     }
     println!("cargo:rustc-link-lib=static=ssl");
     println!("cargo:rustc-link-lib=static=crypto");
+
+    // GOST engine static libs (if built)
+    if let Some(gost) = gost_root.as_ref() {
+        let gost_lib_dir = gost.join("lib");
+        println!("cargo:rustc-link-search=native={}", gost_lib_dir.display());
+        // gost-engine produces various .a files depending on version
+        for entry in std::fs::read_dir(&gost_lib_dir).into_iter().flatten() {
+            if let Ok(entry) = entry {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.ends_with(".a") && name_str.starts_with("lib") {
+                    let lib_name = &name_str[3..name_str.len() - 2]; // strip "lib" and ".a"
+                    println!("cargo:rustc-link-lib=static={}", lib_name);
+                }
+            }
+        }
+    }
 
     // C++ runtime - required because gci_core is a C++17 library.
     if target.contains("android") {
@@ -207,6 +236,42 @@ fn resolve_openssl_root(target: &str, manifest_dir: &Path) -> Option<PathBuf> {
     if libssl.exists() && libcrypto.exists() && header.exists() {
         println!(
             "cargo:warning=gci-app: auto-detected OpenSSL at {}",
+            candidate.display()
+        );
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// Resolves the GOST engine install root from env or by auto-detecting
+/// `third_party/gost-engine/install/<target-subdir>`.
+fn resolve_gost_engine_root(target: &str, manifest_dir: &Path) -> Option<PathBuf> {
+    // 1. Explicit env var
+    if let Ok(root) = env::var("GOST_ENGINE_ROOT") {
+        let p = PathBuf::from(root);
+        if p.join("lib").exists() {
+            return Some(p);
+        }
+    }
+
+    // 2. Auto-detect from workspace layout
+    let subdir = match target {
+        "aarch64-linux-android" => "android-arm64",
+        "x86_64-linux-android" => "android-x86_64",
+        _ => return None,
+    };
+
+    let workspace_root = manifest_dir.parent()?;
+    let candidate = workspace_root
+        .join("third_party")
+        .join("gost-engine")
+        .join("install")
+        .join(subdir);
+
+    if candidate.join("lib").exists() {
+        println!(
+            "cargo:warning=gci-app: auto-detected GOST engine at {}",
             candidate.display()
         );
         Some(candidate)

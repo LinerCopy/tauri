@@ -3,6 +3,11 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
+#include <openssl/provider.h>
+
+#ifdef GCI_GOST_ENABLED
+#include "gost_provider_init.h"
+#endif
 
 #include <cctype>
 #include <cstring>
@@ -12,6 +17,23 @@
 namespace gci {
 
 namespace {
+
+// ── GOST provider initialization (один раз) ──
+void ensure_gost_provider() {
+#ifdef GCI_GOST_ENABLED
+    static bool loaded = false;
+    if (loaded) return;
+    loaded = true;
+
+    // Загружаем стандартный providerдля обычных алгоритмов
+    OSSL_PROVIDER_load(nullptr, "default");
+
+    // Регистрируем GOST как встроенный (статически слинкованный) provider
+    if (OSSL_PROVIDER_add_builtin(nullptr, "gostprov", ossl_gost_provider_init) == 1) {
+        OSSL_PROVIDER_load(nullptr, "gostprov");
+    }
+#endif
+}
 
 std::string openssl_last_error() {
     BIO* bio = BIO_new(BIO_s_mem());
@@ -138,6 +160,8 @@ bool TlsClient::load_trust_store(SSL_CTX* ctx, std::string& error) {
 }
 
 bool TlsClient::connect(const ParsedUrl& url, TlsConnection& out, std::string& error) {
+    ensure_gost_provider();
+
     out.ctx.reset(SSL_CTX_new(TLS_client_method()));
     if (!out.ctx) {
         error = "SSL_CTX_new failed: " + openssl_last_error();
@@ -152,10 +176,22 @@ bool TlsClient::connect(const ParsedUrl& url, TlsConnection& out, std::string& e
         SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 |
         SSL_OP_NO_COMPRESSION |
         SSL_OP_CIPHER_SERVER_PREFERENCE);
+
+    // Разрешаем все «нормальные» шифры + ГОСТ (если провайдер загружен).
+    // OpenSSL игнорирует неизвестные имена в списке — если ГОСТ провайдер
+    // не слинкован, ГОСТ-шифры просто пропускаются.
     SSL_CTX_set_cipher_list(out.ctx.get(),
-        "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:!aNULL:!eNULL:!MD5:!RC4:!3DES");
+        "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM"
+        ":GOST2012-GOST8912-GOST8912:GOST2001-GOST89-GOST89"
+        ":!aNULL:!eNULL:!MD5:!RC4:!3DES");
     SSL_CTX_set_ciphersuites(out.ctx.get(),
-        "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256");
+        "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256"
+        ":TLS_GOSTR341112_256_WITH_KUZNYECHIK_CTR_OMAC"
+        ":TLS_GOSTR341112_256_WITH_MAGMA_CTR_OMAC"
+        ":TLS_GOSTR341112_256_WITH_KUZNYECHIK_MGM_L"
+        ":TLS_GOSTR341112_256_WITH_MAGMA_MGM_L"
+        ":TLS_GOSTR341112_256_WITH_KUZNYECHIK_MGM_S"
+        ":TLS_GOSTR341112_256_WITH_MAGMA_MGM_S");
 
     // Просим OpenSSL валидировать пир, но решение принимаем сами — нам нужны
     // и chain_ok=false случаи с детальной диагностикой.

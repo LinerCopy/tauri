@@ -199,6 +199,23 @@ jobs:
           echo "OpenSSL OK:"
           ls -l "$PREFIX/lib"
 
+      # ── GOST engine для поддержки ГОСТ-шифрования ──
+      - name: Cache GOST engine (Android)
+        id: gost-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/gost-engine
+          key: gost-engine-android-arm64-v1
+
+      - name: Build GOST engine for Android (arm64)
+        if: steps.gost-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        env:
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+          OPENSSL_ROOT: ${{ github.workspace }}/third_party/openssl/install/android-arm64
+        run: |
+          bash scripts/build-gost-engine-android.sh arm64
+
       - name: Rust unit tests (mock-core, host)
         working-directory: src-tauri
         env:
@@ -229,6 +246,7 @@ jobs:
           OPENSSL_ROOT_DIR: ${{ github.workspace }}/third_party/openssl/install/android-arm64
           OPENSSL_LIB_DIR: ${{ github.workspace }}/third_party/openssl/install/android-arm64/lib
           OPENSSL_INCLUDE_DIR: ${{ github.workspace }}/third_party/openssl/install/android-arm64/include
+          GOST_ENGINE_ROOT: ${{ github.workspace }}/third_party/gost-engine/install/android-arm64
         run: >
           cargo tauri android build --debug --apk --target aarch64
           --config '{"build":{"beforeBuildCommand":"","beforeDevCommand":""}}'
