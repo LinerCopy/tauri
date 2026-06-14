@@ -120,7 +120,7 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       ANDROID_NDK_VERSION: "26.2.11394342"
-      OPENSSL_VERSION: "openssl-3.3.0"
+      OPENSSL_VERSION: "openssl-3.4.1"
       MIN_SDK: "26"
     steps:
       - uses: actions/checkout@v4
@@ -180,7 +180,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: third_party/openssl/install
-          key: openssl-android-${{ env.OPENSSL_VERSION }}-ndk${{ env.ANDROID_NDK_VERSION }}-arm64-v3
+          key: openssl-android-${{ env.OPENSSL_VERSION }}-ndk${{ env.ANDROID_NDK_VERSION }}-arm64-v4
 
       - name: Build OpenSSL static for Android (arm64-v8a)
         if: steps.openssl-cache.outputs.cache-hit != 'true'
@@ -205,7 +205,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: third_party/gost-engine
-          key: gost-engine-android-arm64-v3-${{ env.OPENSSL_VERSION }}
+          key: gost-engine-android-arm64-v4-${{ env.OPENSSL_VERSION }}
 
       - name: Build GOST engine for Android (arm64)
         if: steps.gost-cache.outputs.cache-hit != 'true'

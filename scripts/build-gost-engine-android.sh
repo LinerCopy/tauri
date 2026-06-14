@@ -29,7 +29,7 @@ set -euo pipefail
 
 MIN_SDK="${MIN_SDK:-26}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
-GOST_BRANCH="${GOST_BRANCH:-openssl_3_0}"
+GOST_BRANCH="${GOST_BRANCH:-master}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
