@@ -1,0 +1,24 @@
+{
+  "version": "2026.06.12",
+  "issuer": "Минцифры России",
+  "description": "Локальный trust store с корневыми и промежуточными сертификатами УЦ Минцифры России для проверки государственных сайтов РФ.",
+  "source": "https://www.gosuslugi.ru/crt",
+  "updatedAt": "2026-06-12T00:00:00Z",
+  "roots": [
+    {
+      "file": "roots/russian-trusted-root-ca.pem",
+      "subject": "C=RU, O=The Ministry of Digital Development and Communications, CN=Russian Trusted Root CA",
+      "fingerprintSha256": "D2:6D:2D:02:31:B7:C3:9F:92:CC:73:85:12:BA:54:10:35:19:E4:40:5D:68:B5:BD:70:3E:97:88:CA:8E:CF:31",
+      "notAfter": "2032-02-27T21:04:15Z"
+    }
+  ],
+  "intermediates": [
+    {
+      "file": "intermediates/russian-trusted-sub-ca.pem",
+      "subject": "C=RU, O=The Ministry of Digital Development and Communications, CN=Russian Trusted Sub CA",
+      "fingerprintSha256": "BB:BD:E2:10:3E:79:0B:99:9E:C6:2B:D0:3C:F6:25:A5:A2:E7:C3:16:E1:0A:FE:6A:49:0E:ED:EA:D8:B3:FD:9B",
+      "notAfter": "2027-03-06T11:25:19Z"
+    }
+  ],
+  "signature": null
+}

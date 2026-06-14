@@ -1,0 +1,36 @@
+name: cpp-core
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "cpp-core/**"
+      - ".github/workflows/cpp-core.yml"
+  pull_request:
+    paths:
+      - "cpp-core/**"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build g++ libssl-dev
+
+      - name: Configure
+        working-directory: cpp-core
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGCI_BUILD_TESTS=ON
+
+      - name: Build
+        working-directory: cpp-core
+        run: cmake --build build -j
+
+      - name: Test
+        working-directory: cpp-core
+        run: ctest --test-dir build --output-on-failure

@@ -1,0 +1,241 @@
+name: android
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "frontend/**"
+      - "src-tauri/**"
+      - "cpp-core/**"
+      - "trust-store/**"
+      - "scripts/build-openssl-android.sh"
+      - ".github/workflows/android.yml"
+  pull_request:
+  workflow_dispatch:
+
+# ────────────────────────────────────────────────────────────────────────────
+# Два независимых джоба:
+#
+#   1) android-fast   — быстрый прогон UI + Rust unit-тестов + APK на чистом
+#                       Rust-стеке (feature `rust-core`, rustls). Запускается
+#                       на каждом push/PR, держит время ~5–8 минут.
+#
+#   2) android-cpp    — финальная сборка по ТЗ §10:
+#                       C++17 ядро + статический OpenSSL 3.x + CMake + NDK r26+,
+#                       APK без feature `rust-core`. Тяжёлый OpenSSL-build
+#                       агрессивно кешируется.
+# ────────────────────────────────────────────────────────────────────────────
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB 1: быстрый санити-чек (rust-core)
+  # ─────────────────────────────────────────────────────────────────────────
+  android-fast:
+    name: APK (rust-core, fast)
+    runs-on: ubuntu-22.04
+    env:
+      ANDROID_NDK_VERSION: "26.2.11394342"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Rust (stable + Android targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: android-fast
+
+      - name: Setup Android SDK + NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-34 build-tools;34.0.0 ndk;${{ env.ANDROID_NDK_VERSION }}"
+
+      - name: Install Linux system deps (required by Tauri for host compilation)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0" --locked
+
+      - name: Frontend install + test + build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - name: Rust unit tests (mock-core, host)
+        working-directory: src-tauri
+        env:
+          GCI_SKIP_NATIVE: "1"
+        run: cargo test --features mock-core --no-default-features --verbose
+
+      - name: Init Tauri Android project
+        working-directory: src-tauri
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+        run: cargo tauri android init --ci
+
+      - name: Build Android APK (debug, rust-core — pure-Rust TLS)
+        working-directory: src-tauri
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+        run: >
+          cargo tauri android build --debug --apk --target aarch64
+          --features rust-core
+          --config '{"build":{"beforeBuildCommand":"","beforeDevCommand":""}}'
+
+      - name: Upload APK (rust-core)
+        uses: actions/upload-artifact@v4
+        with:
+          name: goscertinspector-debug-rustcore-apk
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: warn
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB 2: TZ-compliant сборка (C++ + OpenSSL static + CMake + NDK r26+)
+  # ─────────────────────────────────────────────────────────────────────────
+  android-cpp:
+    name: APK (C++ core, OpenSSL static, TZ §10)
+    runs-on: ubuntu-22.04
+    env:
+      ANDROID_NDK_VERSION: "26.2.11394342"
+      OPENSSL_VERSION: "openssl-3.3.0"
+      MIN_SDK: "26"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Rust (stable + Android target aarch64)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: android-cpp
+
+      - name: Setup Android SDK + NDK r26+
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-34 build-tools;34.0.0 ndk;${{ env.ANDROID_NDK_VERSION }}"
+
+      - name: Install Linux build deps (CMake/Ninja + Tauri host build)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build g++ pkg-config \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0" --locked
+
+      - name: Frontend install + test + build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      # ── Кешируем уже собранный OpenSSL (libssl.a/libcrypto.a + headers) ──
+      # Ключ зависит только от версии OpenSSL и NDK — при их смене кеш
+      # инвалидируется автоматически.
+      - name: Cache OpenSSL static (Android)
+        id: openssl-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/openssl/install
+          key: openssl-android-${{ env.OPENSSL_VERSION }}-ndk${{ env.ANDROID_NDK_VERSION }}-arm64-v3
+
+      - name: Build OpenSSL static for Android (arm64-v8a)
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        env:
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+        run: |
+          bash scripts/build-openssl-android.sh arm64
+
+      - name: Sanity-check OpenSSL artefacts
+        run: |
+          set -euo pipefail
+          PREFIX="$GITHUB_WORKSPACE/third_party/openssl/install/android-arm64"
+          test -f "$PREFIX/lib/libssl.a"     || { echo "missing libssl.a"; exit 1; }
+          test -f "$PREFIX/lib/libcrypto.a"  || { echo "missing libcrypto.a"; exit 1; }
+          test -f "$PREFIX/include/openssl/ssl.h" || { echo "missing ssl.h"; exit 1; }
+          echo "OpenSSL OK:"
+          ls -l "$PREFIX/lib"
+
+      - name: Rust unit tests (mock-core, host)
+        working-directory: src-tauri
+        env:
+          GCI_SKIP_NATIVE: "1"
+        run: cargo test --features mock-core --no-default-features --verbose
+
+      - name: cpp-core unit tests (host OpenSSL)
+        working-directory: cpp-core
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGCI_BUILD_TESTS=ON
+          cmake --build build -j
+          ctest --test-dir build --output-on-failure
+
+      - name: Init Tauri Android project
+        working-directory: src-tauri
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+        run: cargo tauri android init --ci
+
+      # ── Финальная сборка APK по ТЗ §4 / §10:
+      #    C++ ядро (default-фича, без rust-core), OpenSSL — static,
+      #    CMake поднимает gci_core_static и линкует его в libapp.so.
+      - name: Build Android APK (debug, C++ core + OpenSSL static)
+        working-directory: src-tauri
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+          OPENSSL_ROOT_DIR: ${{ github.workspace }}/third_party/openssl/install/android-arm64
+          OPENSSL_LIB_DIR: ${{ github.workspace }}/third_party/openssl/install/android-arm64/lib
+          OPENSSL_INCLUDE_DIR: ${{ github.workspace }}/third_party/openssl/install/android-arm64/include
+        run: >
+          cargo tauri android build --debug --apk --target aarch64
+          --config '{"build":{"beforeBuildCommand":"","beforeDevCommand":""}}'
+
+      - name: Upload APK (C++ core)
+        uses: actions/upload-artifact@v4
+        with:
+          name: goscertinspector-debug-cpp-apk
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: warn

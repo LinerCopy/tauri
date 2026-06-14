@@ -1,0 +1,58 @@
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+frontend/*.local
+
+# Tauri / Rust
+src-tauri/target/
+src-tauri/gen/
+src-tauri/Cargo.lock.bak
+**/*.rs.bk
+
+# C++ / CMake
+cpp-core/build/
+cpp-core/build-*/
+cpp-core/cmake-build-*/
+cpp-core/.cache/
+cpp-core/install/
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+
+# OpenSSL prebuilt
+third_party/openssl/build/
+third_party/openssl/install/
+
+# Android
+*.apk
+*.aab
+*.keystore
+.gradle/
+local.properties
+
+# iOS
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+*.ipa
+*.dSYM/
+
+# Logs / temp
+*.log
+tmp/
+
+# CLI отчёты (генерируются scripts/check-sites.mjs --out=reports/)
+reports/

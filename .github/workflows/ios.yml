@@ -1,0 +1,153 @@
+name: ios
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "frontend/**"
+      - "src-tauri/**"
+      - "cpp-core/**"
+      - "trust-store/**"
+      - ".github/workflows/ios.yml"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    name: iOS .app (C++ core, OpenSSL XCFramework, TZ §10)
+    runs-on: macos-15
+    env:
+      OPENSSL_VERSION: "openssl-3.3.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Rust (stable + iOS targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ios-cpp
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0" --locked
+
+      - name: Frontend install + test + build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - name: Rust unit tests (mock-core)
+        working-directory: src-tauri
+        env:
+          GCI_SKIP_NATIVE: "1"
+        run: cargo test --features mock-core --no-default-features --verbose
+
+      - name: Install CMake + Ninja
+        run: brew install cmake ninja
+
+      # ── Кешируем три install-каталога OpenSSL (device + sim arm64 + sim x86_64),
+      #    а также готовый OpenSSL.xcframework. Ключ зависит от версии и Xcode-major.
+      - name: Cache OpenSSL build
+        id: openssl-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/openssl/install
+          key: openssl-ios-${{ env.OPENSSL_VERSION }}-xcode-v3
+
+      - name: Build OpenSSL (static) for iOS device + simulator
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p third_party && cd third_party
+          git clone --depth 1 --branch ${OPENSSL_VERSION} https://github.com/openssl/openssl.git
+          cd openssl
+          # ── device arm64 ───────────────────────────────────────────────────
+          make distclean >/dev/null 2>&1 || true
+          ./Configure ios64-xcrun no-shared no-tests no-asm \
+            --prefix=$PWD/../openssl/install/ios-arm64 \
+            --openssldir=$PWD/../openssl/install/ios-arm64/ssl
+          make -j"$(sysctl -n hw.ncpu)" build_libs && make install_dev
+          # ── simulator arm64 (Apple Silicon Mac) ────────────────────────────
+          make distclean
+          ./Configure iossimulator-xcrun no-shared no-tests no-asm \
+            --prefix=$PWD/../openssl/install/ios-simulator-arm64 \
+            --openssldir=$PWD/../openssl/install/ios-simulator-arm64/ssl \
+            CFLAGS="-arch arm64"
+          make -j"$(sysctl -n hw.ncpu)" build_libs && make install_dev
+          # ── simulator x86_64 (Intel Mac / Xcode CI iPhone Simulator) ───────
+          make distclean
+          ./Configure iossimulator-xcrun no-shared no-tests no-asm \
+            --prefix=$PWD/../openssl/install/ios-simulator-x86_64 \
+            --openssldir=$PWD/../openssl/install/ios-simulator-x86_64/ssl \
+            CFLAGS="-arch x86_64"
+          make -j"$(sysctl -n hw.ncpu)" build_libs && make install_dev
+
+      - name: Assemble OpenSSL.xcframework (TZ §10)
+        run: |
+          set -euo pipefail
+          ROOT="${GITHUB_WORKSPACE}/third_party/openssl/install"
+          OUT="${ROOT}/OpenSSL.xcframework"
+          rm -rf "${OUT}"
+          # Сначала ssl, затем crypto — отдельные xcframework на библиотеку.
+          for lib in ssl crypto; do
+            xcodebuild -create-xcframework \
+              -library "${ROOT}/ios-arm64/lib/lib${lib}.a"           -headers "${ROOT}/ios-arm64/include" \
+              -library "${ROOT}/ios-simulator-arm64/lib/lib${lib}.a" -headers "${ROOT}/ios-simulator-arm64/include" \
+              -output "${ROOT}/${lib}.xcframework"
+          done
+          ls -la "${ROOT}"
+          ls -la "${ROOT}/ssl.xcframework"
+
+      - name: cpp-core unit tests (macOS host)
+        working-directory: cpp-core
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGCI_BUILD_TESTS=ON
+          cmake --build build -j
+          ctest --test-dir build --output-on-failure
+
+      - name: Init Tauri iOS project
+        working-directory: src-tauri
+        run: cargo tauri ios init --ci
+
+      - name: Disable code signing for CI
+        run: |
+          PROJ="src-tauri/gen/apple/gci-app.xcodeproj/project.pbxproj"
+          # Ad-hoc signing (no provisioning profile required)
+          sed -i '' 's/CODE_SIGN_IDENTITY = "[^"]*"/CODE_SIGN_IDENTITY = "-"/g' "$PROJ"
+          # Remove any development team requirement
+          sed -i '' 's/DEVELOPMENT_TEAM = [^;]*/DEVELOPMENT_TEAM = ""/g' "$PROJ"
+          # Inject CODE_SIGNING_REQUIRED = NO and CODE_SIGNING_ALLOWED = NO
+          perl -i -pe 's/(buildSettings = \{)/$1\n\t\t\t\tCODE_SIGNING_REQUIRED = NO;\n\t\t\t\tCODE_SIGNING_ALLOWED = NO;/g' "$PROJ"
+
+      # ── Финальная сборка по ТЗ §4 / §10: C++ ядро + OpenSSL static.
+      #    rust-core фича НЕ включается (это обходной путь, не из ТЗ).
+      #    beforeBuildCommand отключается: frontend уже собран на предыдущем шаге.
+      - name: Build iOS (device, debug, C++ core + OpenSSL static)
+        working-directory: src-tauri
+        env:
+          OPENSSL_ROOT_DIR: ${{ github.workspace }}/third_party/openssl/install/ios-arm64
+          OPENSSL_LIB_DIR: ${{ github.workspace }}/third_party/openssl/install/ios-arm64/lib
+          OPENSSL_INCLUDE_DIR: ${{ github.workspace }}/third_party/openssl/install/ios-arm64/include
+        run: >
+          cargo tauri ios build --debug --target aarch64
+          --config '{"build":{"beforeBuildCommand":"","beforeDevCommand":""}}'
+
+      - name: Upload .app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: goscertinspector-debug-ios
+          path: src-tauri/gen/apple/build/**/*.app
+          if-no-files-found: warn
