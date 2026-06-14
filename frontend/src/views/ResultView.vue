@@ -136,7 +136,28 @@ function showToast(msg: string) {
 <template>
   <div class="result-view" v-if="data">
     <header class="result-header">
-      <button class="back-btn" type="button" @click="goBack">←</button>
+      <button
+        class="back-btn"
+        type="button"
+        aria-label="Назад"
+        @click="goBack"
+      >
+        <svg
+          class="back-icon"
+          viewBox="0 0 24 24"
+          xmlns="http://www.w3.org/2000/svg"
+          aria-hidden="true"
+        >
+          <path
+            d="M19 12H5M12 19l-7-7 7-7"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.4"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
       <div class="header-title">
         <span class="header-host">{{
           data.resolvedHost || data.inputUrl
@@ -330,21 +351,29 @@ function showToast(msg: string) {
 }
 .back-btn {
   flex-shrink: 0;
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   border: none;
   background: #f0f2f5;
-  border-radius: 10px;
-  font-size: 18px;
+  border-radius: 12px;
+  padding: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   -webkit-tap-highlight-color: transparent;
   cursor: pointer;
+  color: #1f2937;
+  line-height: 1;
 }
 .back-btn:active {
-  transform: scale(0.9);
+  transform: scale(0.92);
   background: #e0e3e8;
+}
+.back-icon {
+  width: 24px;
+  height: 24px;
+  display: block;
+  pointer-events: none;
 }
 .header-title {
   flex: 1;

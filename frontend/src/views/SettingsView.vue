@@ -19,17 +19,48 @@ interface TrustStoreManifest {
   intermediates: CertEntry[];
 }
 
+interface UpdateCheckEntry {
+  name: string;
+  url: string;
+  bundledFingerprint: string;
+  remoteFingerprint: string | null;
+  matchesBundled: boolean;
+  error: string | null;
+}
+interface UpdateCheckResult {
+  checkedAt: string;
+  bundledVersion: string;
+  entries: UpdateCheckEntry[];
+  upToDate: boolean;
+}
+
+const LS_LAST_CHECK = "gci.lastUpdateCheck";
+
 const router = useRouter();
 const manifest = ref<TrustStoreManifest | null>(null);
 const coreVersion = ref<string>("");
 const error = ref<string | null>(null);
 const toastMsg = ref("");
 const checkingUpdate = ref(false);
-const lastCheckedAt = ref<string | null>(null);
+const lastCheck = ref<UpdateCheckResult | null>(null);
 
 onMounted(() => {
   loadManifest();
+  restoreLastCheck();
 });
+
+function restoreLastCheck() {
+  try {
+    const raw = localStorage.getItem(LS_LAST_CHECK);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as UpdateCheckResult;
+    if (parsed && typeof parsed.checkedAt === "string") {
+      lastCheck.value = parsed;
+    }
+  } catch {
+    /* ignore corrupt storage */
+  }
+}
 
 async function loadManifest() {
   error.value = null;
@@ -137,24 +168,38 @@ async function copyAllFingerprints() {
 }
 
 /**
- * "Проверить обновление" — в MVP мы не делаем OTA-загрузку trust-store
- * (это требует подписанного манифеста и инфраструктуры распространения,
- * см. trust-store/README.md). Вместо этого:
- *   1) перечитываем уже встроенный манифест (на случай, если приложение
- *      обновилось через сторонний канал),
- *   2) фиксируем дату последней проверки,
- *   3) показываем пользователю результат сравнения с встроенной версией.
+ * Реальная проверка обновлений: бэкенд скачивает официальные PEM
+ * с сайта УЦ Минцифры и сравнивает SHA-256 с встроенным манифестом.
+ *
+ * По соображениям безопасности trust-store НЕ перезаписывается на лету
+ * (это нарушило бы модель «trust-store подписан вместе с приложением»,
+ * см. ТЗ §9). Если на сервере есть новая версия — пользователю
+ * предлагается обновить приложение через App Store / Google Play.
  */
 async function checkForUpdate() {
   if (checkingUpdate.value) return;
   checkingUpdate.value = true;
   try {
-    await new Promise((r) => setTimeout(r, 350));
+    const res = await invoke<UpdateCheckResult>("check_trust_store_updates");
+    lastCheck.value = res;
+    try {
+      localStorage.setItem(LS_LAST_CHECK, JSON.stringify(res));
+    } catch {
+      /* private mode / quota — игнорируем */
+    }
     await loadManifest();
-    lastCheckedAt.value = new Date().toISOString();
-    showToast(
-      "Сертификаты актуальны (версия " + (manifest.value?.version ?? "—") + ")",
-    );
+    const hasError = res.entries.some((e: UpdateCheckEntry) => e.error);
+    if (hasError) {
+      showToast("Не удалось проверить часть источников");
+    } else if (res.upToDate) {
+      showToast(
+        "Сертификаты актуальны (версия " +
+          (manifest.value?.version ?? res.bundledVersion ?? "—") +
+          ")",
+      );
+    } else {
+      showToast("Доступно обновление — обновите приложение");
+    }
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
     showToast("Ошибка проверки обновления");
@@ -162,6 +207,17 @@ async function checkForUpdate() {
     checkingUpdate.value = false;
   }
 }
+
+const updateBadge = computed(() => {
+  if (!lastCheck.value) return null;
+  if (lastCheck.value.entries.some((e: UpdateCheckEntry) => e.error)) {
+    return { kind: "warn", text: "Не удалось проверить часть источников" };
+  }
+  if (lastCheck.value.upToDate) {
+    return { kind: "ok", text: "Сертификаты актуальны" };
+  }
+  return { kind: "update", text: "Доступно обновление trust-store" };
+});
 
 function showToast(msg: string) {
   toastMsg.value = msg;
@@ -175,7 +231,21 @@ function showToast(msg: string) {
   <div class="settings-view">
     <header class="settings-header">
       <button class="back-btn" type="button" aria-label="Назад" @click="goBack">
-        ←
+        <svg
+          class="back-icon"
+          viewBox="0 0 24 24"
+          xmlns="http://www.w3.org/2000/svg"
+          aria-hidden="true"
+        >
+          <path
+            d="M19 12H5M12 19l-7-7 7-7"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.4"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
       </button>
       <div class="header-title">Настройки</div>
     </header>
@@ -225,20 +295,37 @@ function showToast(msg: string) {
           >
             📋 Скопировать SHA-256 для сверки
           </button>
-
-          <button
-            v-if="manifest?.source"
-            class="btn btn-secondary"
-            type="button"
-            @click="openSource"
-          >
-            🔗 Открыть источник
-          </button>
         </div>
 
-        <p v-if="lastCheckedAt" class="check-status">
-          Последняя проверка: {{ formatDateTime(lastCheckedAt) }}
+        <div v-if="updateBadge" class="check-badge" :class="`badge-${updateBadge.kind}`">
+          <span class="badge-dot" />
+          <span>{{ updateBadge.text }}</span>
+        </div>
+
+        <p v-if="lastCheck" class="check-status">
+          Последняя проверка: {{ formatDateTime(lastCheck.checkedAt) }}
         </p>
+
+        <ul v-if="lastCheck" class="check-list">
+          <li
+            v-for="entry in lastCheck.entries"
+            :key="entry.name"
+            :class="{
+              ok: entry.matchesBundled && !entry.error,
+              warn: !entry.matchesBundled && !entry.error,
+              err: !!entry.error,
+            }"
+          >
+            <span class="check-icon">
+              {{ entry.error ? "!" : entry.matchesBundled ? "✓" : "↑" }}
+            </span>
+            <span class="check-name">{{ entry.name }}</span>
+            <span v-if="entry.error" class="check-msg">{{ entry.error }}</span>
+            <span v-else-if="entry.matchesBundled" class="check-msg">актуален</span>
+            <span v-else class="check-msg">доступна новая версия</span>
+          </li>
+        </ul>
+
         <p class="info-hint">
           Чтобы убедиться, что приложение работает с настоящими сертификатами
           Минцифры — скопируйте SHA-256 и сверьте их со значениями,
@@ -341,21 +428,29 @@ function showToast(msg: string) {
 }
 .back-btn {
   flex-shrink: 0;
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   border: none;
   background: #f0f2f5;
-  border-radius: 10px;
-  font-size: 18px;
+  border-radius: 12px;
+  padding: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   -webkit-tap-highlight-color: transparent;
   cursor: pointer;
+  color: #1f2937;
+  line-height: 1;
 }
 .back-btn:active {
-  transform: scale(0.9);
+  transform: scale(0.92);
   background: #e0e3e8;
+}
+.back-icon {
+  width: 24px;
+  height: 24px;
+  display: block;
+  pointer-events: none;
 }
 .header-title {
   flex: 1;
@@ -484,6 +579,106 @@ function showToast(msg: string) {
   font-size: 12px;
   color: #047857;
   margin: 8px 0 0;
+}
+
+.check-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.badge-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.badge-ok {
+  background: #ecfdf5;
+  color: #065f46;
+  border: 1px solid #6ee7b7;
+}
+.badge-ok .badge-dot {
+  background: #10b981;
+}
+.badge-update {
+  background: #eff6ff;
+  color: #1e40af;
+  border: 1px solid #93c5fd;
+}
+.badge-update .badge-dot {
+  background: #3b82f6;
+}
+.badge-warn {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+}
+.badge-warn .badge-dot {
+  background: #f59e0b;
+}
+
+.check-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.check-list li {
+  display: grid;
+  grid-template-columns: 18px 70px 1fr;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+}
+.check-list .check-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+}
+.check-list .check-name {
+  font-family: monospace;
+  font-weight: 600;
+  color: #374151;
+}
+.check-list .check-msg {
+  color: #6b7280;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.check-list li.ok .check-icon {
+  background: #dcfce7;
+  color: #16a34a;
+}
+.check-list li.warn .check-icon {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+.check-list li.warn .check-msg {
+  color: #1d4ed8;
+}
+.check-list li.err .check-icon {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+.check-list li.err .check-msg {
+  color: #b91c1c;
 }
 
 .link-btn {

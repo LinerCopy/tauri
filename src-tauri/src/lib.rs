@@ -16,6 +16,7 @@ pub fn run() {
             commands::core_version,
             commands::save_report,
             commands::trust_store_info,
+            commands::check_trust_store_updates,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]

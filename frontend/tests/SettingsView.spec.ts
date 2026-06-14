@@ -41,6 +41,31 @@ function setupInvoke() {
   fn.mockImplementation(async (cmd: string) => {
     if (cmd === 'trust_store_info') return mockManifest;
     if (cmd === 'core_version') return 'gci-core 1.0.0';
+    if (cmd === 'check_trust_store_updates') {
+      return {
+        checkedAt: new Date().toISOString(),
+        bundledVersion: mockManifest.version,
+        entries: [
+          {
+            name: 'root',
+            url: 'https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt',
+            bundledFingerprint: mockManifest.roots[0].fingerprintSha256,
+            remoteFingerprint: mockManifest.roots[0].fingerprintSha256,
+            matchesBundled: true,
+            error: null,
+          },
+          {
+            name: 'sub',
+            url: 'https://gu-st.ru/content/lending/russian_trusted_sub_ca_pem.crt',
+            bundledFingerprint: mockManifest.intermediates[0].fingerprintSha256,
+            remoteFingerprint: mockManifest.intermediates[0].fingerprintSha256,
+            matchesBundled: true,
+            error: null,
+          },
+        ],
+        upToDate: true,
+      };
+    }
     throw new Error(`unexpected cmd ${cmd}`);
   });
   return fn;
@@ -49,12 +74,18 @@ function setupInvoke() {
 describe('SettingsView', () => {
   beforeEach(() => {
     routerPush.mockReset();
+    // Clear localStorage so persisted last-check doesn't leak between tests.
+    try {
+      localStorage.clear();
+    } catch {
+      /* jsdom may not always have localStorage; ignore */
+    }
     // Stub clipboard so copy buttons work in jsdom.
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: { writeText: vi.fn().mockResolvedValue(undefined) },
     });
-    // window.open used by openSource()
+    // window.open used by source link card.
     vi.spyOn(window, 'open').mockImplementation(() => null);
   });
 
@@ -120,30 +151,30 @@ describe('SettingsView', () => {
     expect(updateBtn).toBeTruthy();
     await updateBtn!.trigger('click');
     await flushPromises();
-    // wait the small setTimeout(350)
-    await new Promise((r) => setTimeout(r, 400));
-    await flushPromises();
 
-    // reload = +2 more invocations
-    expect(fn).toHaveBeenCalledTimes(4);
+    // +1 check_trust_store_updates, +2 trust_store_info & core_version refresh
+    expect(fn).toHaveBeenCalledTimes(5);
     expect(wrapper.html()).toContain('Последняя проверка');
+    expect(wrapper.html()).toContain('Сертификаты актуальны');
   });
 
-  it('opens source URL via window.open', async () => {
+  it('persists last check across remount via localStorage', async () => {
     setupInvoke();
-    const wrapper = mount(SettingsView);
+    const first = mount(SettingsView);
     await flushPromises();
-
-    const openBtn = wrapper
+    const updateBtn = first
       .findAll('button')
-      .find((b) => b.text().includes('Открыть источник'));
-    expect(openBtn).toBeTruthy();
-    await openBtn!.trigger('click');
-    expect(window.open).toHaveBeenCalledWith(
-      mockManifest.source,
-      '_blank',
-      'noopener,noreferrer',
-    );
+      .find((b) => b.text().includes('Проверить обновление'));
+    await updateBtn!.trigger('click');
+    await flushPromises();
+    expect(first.html()).toContain('Последняя проверка');
+
+    // Remount — last check date must still be displayed without clicking again.
+    first.unmount();
+    const second = mount(SettingsView);
+    await flushPromises();
+    expect(second.html()).toContain('Последняя проверка');
+    expect(second.html()).toContain('Сертификаты актуальны');
   });
 
   it('navigates back to home', async () => {

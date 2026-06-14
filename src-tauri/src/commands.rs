@@ -3,8 +3,11 @@
 use crate::dto::{InspectRequest, InspectResult};
 use crate::ffi;
 
+use base64::Engine as _;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+use std::time::Duration;
 use tauri::Manager;
 
 #[derive(Debug, thiserror::Error)]
@@ -19,6 +22,8 @@ pub enum CommandError {
     Json(#[from] serde_json::Error),
     #[error("internal: {0}")]
     Internal(String),
+    #[error("network: {0}")]
+    Network(String),
 }
 
 impl Serialize for CommandError {
@@ -169,6 +174,230 @@ fn get_download_dir() -> Result<PathBuf, CommandError> {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Реальная проверка обновлений trust-store (ТЗ §9).
+//
+// По умолчанию trust-store встроен в бинарь и обновляется только через
+// App Store / Google Play. Эта команда выполняет «честную» онлайн-сверку:
+// скачивает официальные PEM с сайта УЦ Минцифры, считает SHA-256 от их
+// DER-представления и сравнивает с встроенным манифестом.
+//
+// Если фингерпринты совпадают → пользователь видит «актуально».
+// Если различаются → видит «доступна новая версия — обновите приложение».
+// OTA-замена сертификатов не выполняется намеренно, чтобы сохранить
+// модель «trust-store подписан вместе с приложением».
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Описание одного источника, который мы проверяем онлайн.
+struct UpdateSource {
+    /// Логическое имя, отображается во фронте (`root`, `sub`).
+    name: &'static str,
+    /// Подкаталог встроенного манифеста: `roots` / `intermediates`.
+    bundle_key: &'static str,
+    /// Имя PEM-файла, по которому ищем встроенный fingerprint.
+    bundle_file: &'static str,
+    /// Официальный URL с PEM на сайте УЦ Минцифры России.
+    url: &'static str,
+}
+
+const UPDATE_SOURCES: &[UpdateSource] = &[
+    UpdateSource {
+        name: "root",
+        bundle_key: "roots",
+        bundle_file: "roots/russian-trusted-root-ca.pem",
+        url: "https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt",
+    },
+    UpdateSource {
+        name: "sub",
+        bundle_key: "intermediates",
+        bundle_file: "intermediates/russian-trusted-sub-ca.pem",
+        url: "https://gu-st.ru/content/lending/russian_trusted_sub_ca_pem.crt",
+    },
+];
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCheckEntry {
+    name: String,
+    url: String,
+    bundled_fingerprint: String,
+    remote_fingerprint: Option<String>,
+    matches_bundled: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckResult {
+    checked_at: String,
+    bundled_version: String,
+    entries: Vec<UpdateCheckEntry>,
+    up_to_date: bool,
+}
+
+/// Парсит PEM-строку, возвращает первый DER-блок CERTIFICATE.
+fn pem_to_der(pem: &str) -> Result<Vec<u8>, String> {
+    let mut in_cert = false;
+    let mut b64 = String::new();
+    for line in pem.lines() {
+        let line = line.trim();
+        if line.starts_with("-----BEGIN CERTIFICATE") {
+            in_cert = true;
+            continue;
+        }
+        if line.starts_with("-----END CERTIFICATE") {
+            break;
+        }
+        if in_cert && !line.is_empty() {
+            b64.push_str(line);
+        }
+    }
+    if b64.is_empty() {
+        return Err("no CERTIFICATE block in PEM".into());
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .map_err(|e| format!("base64 decode: {}", e))
+}
+
+/// Форматирует bytes как `AA:BB:CC:...` (так же, как в manifest.json).
+fn fmt_fingerprint(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 {
+            out.push(':');
+        }
+        out.push_str(&format!("{:02X}", b));
+    }
+    out
+}
+
+/// Достаёт fingerprint из встроенного манифеста по `file`.
+fn bundled_fingerprint(manifest: &serde_json::Value, key: &str, file: &str) -> Option<String> {
+    let arr = manifest.get(key)?.as_array()?;
+    for item in arr {
+        if item.get("file").and_then(|f| f.as_str()) == Some(file) {
+            return item
+                .get("fingerprintSha256")
+                .and_then(|f| f.as_str())
+                .map(|s| s.to_string());
+        }
+    }
+    None
+}
+
+/// Скачивает PEM по URL и возвращает SHA-256 от DER-представления сертификата.
+async fn fetch_remote_fingerprint(client: &reqwest::Client, url: &str) -> Result<String, String> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("read body: {}", e))?;
+    let der = pem_to_der(&body)?;
+    let digest = Sha256::digest(&der);
+    Ok(fmt_fingerprint(&digest))
+}
+
+#[tauri::command]
+pub async fn check_trust_store_updates() -> Result<UpdateCheckResult, CommandError> {
+    let manifest: serde_json::Value = serde_json::from_str(TRUST_STORE_MANIFEST)?;
+    let bundled_version = manifest
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let client = reqwest::Client::builder()
+        .user_agent("GosCertInspector/1.0 (+update-check)")
+        .timeout(Duration::from_secs(20))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| CommandError::Network(e.to_string()))?;
+
+    let mut entries = Vec::with_capacity(UPDATE_SOURCES.len());
+    let mut all_match = true;
+
+    for src in UPDATE_SOURCES {
+        let bundled_fp =
+            bundled_fingerprint(&manifest, src.bundle_key, src.bundle_file).unwrap_or_default();
+
+        match fetch_remote_fingerprint(&client, src.url).await {
+            Ok(remote_fp) => {
+                let matches = remote_fp.eq_ignore_ascii_case(&bundled_fp);
+                if !matches {
+                    all_match = false;
+                }
+                entries.push(UpdateCheckEntry {
+                    name: src.name.to_string(),
+                    url: src.url.to_string(),
+                    bundled_fingerprint: bundled_fp,
+                    remote_fingerprint: Some(remote_fp),
+                    matches_bundled: matches,
+                    error: None,
+                });
+            }
+            Err(err) => {
+                all_match = false;
+                entries.push(UpdateCheckEntry {
+                    name: src.name.to_string(),
+                    url: src.url.to_string(),
+                    bundled_fingerprint: bundled_fp,
+                    remote_fingerprint: None,
+                    matches_bundled: false,
+                    error: Some(err),
+                });
+            }
+        }
+    }
+
+    Ok(UpdateCheckResult {
+        checked_at: current_iso8601(),
+        bundled_version,
+        entries,
+        up_to_date: all_match,
+    })
+}
+
+/// Минимальный ISO-8601 без зависимости от `chrono` (которое у нас под фичей).
+fn current_iso8601() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Быстрый перевод UNIX-секунд в UTC YYYY-MM-DDTHH:MM:SSZ (алгоритм
+    // Howard Hinnant'a, без внешних зависимостей).
+    let days = (secs / 86_400) as i64;
+    let secs_of_day = (secs % 86_400) as u32;
+    let h = secs_of_day / 3600;
+    let m = (secs_of_day % 3600) / 60;
+    let s = secs_of_day % 60;
+
+    // 1970-01-01 == day 0 в shifted-эпохе Hinnant'a (era 0 starts at 0000-03-01)
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if mo <= 2 { y + 1 } else { y };
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, mo, d, h, m, s
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +441,43 @@ mod tests {
     fn trust_store_info_returns_manifest() {
         let v = trust_store_info().expect("trust_store_info should succeed");
         assert!(v.get("issuer").is_some());
+    }
+
+    #[test]
+    fn pem_to_der_extracts_certificate_body() {
+        let pem = "-----BEGIN CERTIFICATE-----\nQUJDREVGRw==\n-----END CERTIFICATE-----\n";
+        let der = pem_to_der(pem).expect("PEM must decode");
+        assert_eq!(der, b"ABCDEFG");
+    }
+
+    #[test]
+    fn pem_to_der_rejects_empty() {
+        assert!(pem_to_der("garbage").is_err());
+    }
+
+    #[test]
+    fn fmt_fingerprint_uses_colon_uppercase_hex() {
+        assert_eq!(fmt_fingerprint(&[0xAB, 0xCD, 0x01]), "AB:CD:01");
+    }
+
+    #[test]
+    fn bundled_fingerprint_returns_known_value() {
+        let manifest: serde_json::Value = serde_json::from_str(TRUST_STORE_MANIFEST).unwrap();
+        let fp = bundled_fingerprint(&manifest, "roots", "roots/russian-trusted-root-ca.pem")
+            .expect("bundled fingerprint must exist");
+        assert!(
+            fp.starts_with("D2:6D:2D"),
+            "unexpected bundled fingerprint: {fp}"
+        );
+    }
+
+    #[test]
+    fn current_iso8601_is_well_formed() {
+        let s = current_iso8601();
+        assert_eq!(s.len(), 20, "iso8601 must be 20 chars: {s}");
+        assert!(s.ends_with('Z'));
+        assert_eq!(s.chars().nth(4), Some('-'));
+        assert_eq!(s.chars().nth(7), Some('-'));
+        assert_eq!(s.chars().nth(10), Some('T'));
     }
 }

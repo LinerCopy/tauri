@@ -27,6 +27,16 @@ thiserror = "1"
 uuid = { version = "1", features = ["v4"] }
 log = "0.4"
 
+# OTA-проверка trust-store (ТЗ §9): скачиваем официальные PEM с УЦ Минцифры
+# и сравниваем SHA-256 с встроенным манифестом. Используем rustls без
+# OpenSSL, чтобы не тянуть лишний нативный код на iOS/Android.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-webpki-roots",
+    "http2",
+] }
+sha2 = "0.10"
+base64 = "0.22"
+
 # rust-core dependencies (real TLS without C++/OpenSSL)
 rustls = { version = "0.23", optional = true }
 rustls-pemfile = { version = "2", optional = true }
@@ -34,7 +44,6 @@ webpki-roots = { version = "0.26", optional = true }
 x509-parser = { version = "0.16", optional = true }
 tokio = { version = "1", features = ["net", "io-util", "time"], optional = true }
 chrono = { version = "0.4", optional = true }
-sha2 = { version = "0.10", optional = true }
 hex = { version = "0.4", optional = true }
 
 # File system utilities
@@ -46,7 +55,7 @@ tauri-plugin-shell = "2.0"
 [features]
 default = []
 mock-core = []
-rust-core = ["rustls", "rustls-pemfile", "webpki-roots", "x509-parser", "tokio", "chrono", "sha2", "hex"]
+rust-core = ["rustls", "rustls-pemfile", "webpki-roots", "x509-parser", "tokio", "chrono", "hex"]
 
 [profile.release]
 codegen-units = 1

@@ -7,6 +7,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
   if (cmd === 'trust_store_info') {
     return mockTrustStoreManifest() as unknown as T;
   }
+  if (cmd === 'check_trust_store_updates') {
+    return mockUpdateCheck() as unknown as T;
+  }
   if (cmd === 'save_report') {
     const filename = String((args ?? {}).filename ?? 'report.json');
     return (`/demo/Downloads/${filename}`) as unknown as T;
@@ -175,8 +178,7 @@ function pseudoSha256(seed: string): string {
   return out.toUpperCase();
 }
 
-function mockTrustStoreManifest() {
-  return {
+function mockTrustStoreManifest() {  return {
     version: '2026.06.12',
     issuer: 'Минцифры России',
     description:
@@ -204,5 +206,35 @@ function mockTrustStoreManifest() {
       },
     ],
     signature: null,
+  };
+}
+
+function mockUpdateCheck() {
+  const bundledRoot =
+    'D2:6D:2D:02:31:B7:C3:9F:92:CC:73:85:12:BA:54:10:35:19:E4:40:5D:68:B5:BD:70:3E:97:88:CA:8E:CF:31';
+  const bundledSub =
+    'BB:BD:E2:10:3E:79:0B:99:9E:C6:2B:D0:3C:F6:25:A5:A2:E7:C3:16:E1:0A:FE:6A:49:0E:ED:EA:D8:B3:FD:9B';
+  return {
+    checkedAt: new Date().toISOString(),
+    bundledVersion: '2026.06.12',
+    entries: [
+      {
+        name: 'root',
+        url: 'https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt',
+        bundledFingerprint: bundledRoot,
+        remoteFingerprint: bundledRoot,
+        matchesBundled: true,
+        error: null,
+      },
+      {
+        name: 'sub',
+        url: 'https://gu-st.ru/content/lending/russian_trusted_sub_ca_pem.crt',
+        bundledFingerprint: bundledSub,
+        remoteFingerprint: bundledSub,
+        matchesBundled: true,
+        error: null,
+      },
+    ],
+    upToDate: true,
   };
 }

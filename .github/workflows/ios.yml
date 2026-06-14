@@ -135,7 +135,17 @@ jobs:
       # ── Финальная сборка по ТЗ §4 / §10: C++ ядро + OpenSSL static.
       #    rust-core фича НЕ включается (это обходной путь, не из ТЗ).
       #    beforeBuildCommand отключается: frontend уже собран на предыдущем шаге.
+      #
+      #    Без Apple Developer-аккаунта `xcodebuild -exportArchive` падает
+      #    с «No Team Found in Archive» — это нормально для open-source CI.
+      #    Поэтому шаг помечен continue-on-error: следующий шаг достанет
+      #    готовый .app прямо из .xcarchive (он собирается ДО экспорта).
+      #    Полная пошаговая инструкция, как подключить Apple-аккаунт
+      #    (бесплатный личный или $99/year Developer Program) и получить
+      #    подписанный .ipa — см. docs/ios-signing.md.
       - name: Build iOS (device, debug, C++ core + OpenSSL static)
+        id: ios-build
+        continue-on-error: true
         working-directory: src-tauri
         env:
           OPENSSL_ROOT_DIR: ${{ github.workspace }}/third_party/openssl/install/ios-arm64
@@ -145,9 +155,43 @@ jobs:
           cargo tauri ios build --debug --target aarch64
           --config '{"build":{"beforeBuildCommand":"","beforeDevCommand":""}}'
 
+      # exportArchive падает без team-id, но сам .app собирается успешно
+      # и лежит внутри .xcarchive — копируем его в gen/apple/build/Artifacts/
+      # для последующего upload-artifact.
+      - name: Extract .app from .xcarchive (fallback without signing)
+        run: |
+          set -euo pipefail
+          DEST="src-tauri/gen/apple/build/Artifacts"
+          mkdir -p "$DEST"
+
+          echo "── Searching .app under gen/apple/build/ ──"
+          find src-tauri/gen/apple/build -type d -name "*.app" 2>/dev/null || true
+
+          echo "── Searching .xcarchive ──"
+          ARCHIVES=$(find src-tauri/gen/apple -type d -name "*.xcarchive" 2>/dev/null || true)
+          for AR in $ARCHIVES; do
+            echo "Found archive: $AR"
+            if [ -d "$AR/Products/Applications" ]; then
+              cp -R "$AR"/Products/Applications/*.app "$DEST/" 2>/dev/null || true
+            fi
+          done
+
+          echo "── Final artifact contents ──"
+          ls -la "$DEST" || true
+          find "$DEST" -maxdepth 3 -type d | head -50
+
+          # Fail the job ONLY if no .app was produced anywhere — that's a
+          # real build error, not a signing/export issue we tolerate above.
+          if [ -z "$(find src-tauri/gen/apple -type d -name '*.app' 2>/dev/null | head -1)" ]; then
+            echo "::error::No .app produced; iOS build genuinely failed"
+            exit 1
+          fi
+
       - name: Upload .app artifact
         uses: actions/upload-artifact@v4
         with:
           name: goscertinspector-debug-ios
-          path: src-tauri/gen/apple/build/**/*.app
+          path: |
+            src-tauri/gen/apple/build/Artifacts/**/*.app
+            src-tauri/gen/apple/build/**/*.app
           if-no-files-found: warn
