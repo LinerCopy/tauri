@@ -37,6 +37,8 @@ export interface InspectResult {
   resolvedHost: string;
   tlsVersion: string;
   tlsCipher?: string;
+  isGostCipher?: boolean;
+  gostSupported?: boolean;
   certificate: Certificate | null;
   chain: ChainEntry[];
   validation: Validation;
@@ -56,5 +58,6 @@ export const KNOWN_SITES: KnownSite[] = [
   { id: 'esia',          title: 'ЕСИА',                       url: 'https://esia.gosuslugi.ru' },
   { id: 'nalog',         title: 'ФНС России',                 url: 'https://nalog.gov.ru' },
   { id: 'zakupki',       title: 'Единый портал закупок',      url: 'https://zakupki.gov.ru' },
+  { id: 'rosreestr',     title: 'Росреестр (ГОСТ TLS)',       url: 'https://rosreestr.gov.ru' },
   { id: 'gost',          title: 'Росстандарт',                url: 'https://gost.ru' },
 ];

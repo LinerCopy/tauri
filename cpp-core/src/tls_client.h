@@ -18,6 +18,12 @@ struct ParsedUrl {
 
 bool parse_url(const std::string& url, ParsedUrl& out, std::string& error);
 
+/**
+ * Возвращает true, если GOST provider успешно загружен в OpenSSL.
+ * Используется для отображения статуса ГОСТ-поддержки в JSON ответе.
+ */
+bool gost_provider_loaded();
+
 struct TlsConnection {
     // BIO владеет SSL: освобождение SSL произойдёт через BIO_free_all.
     // Не храним отдельный unique_ptr<SSL>, чтобы исключить double-free.

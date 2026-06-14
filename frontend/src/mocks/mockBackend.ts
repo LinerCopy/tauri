@@ -32,6 +32,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     resolvedHost: host,
     tlsVersion: profile.tlsVersion,
     tlsCipher: profile.tlsCipher,
+    isGostCipher: profile.tlsCipher.includes('GOST') || profile.tlsCipher.includes('KUZNYECHIK'),
+    gostSupported: false,
     certificate: {
       subject: `CN=${host},O=${profile.org},C=RU`,
       issuer: profile.issuer,

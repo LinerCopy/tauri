@@ -199,22 +199,39 @@ jobs:
           echo "OpenSSL OK:"
           ls -l "$PREFIX/lib"
 
-      # ── GOST engine для поддержки ГОСТ-шифрования ──
+      # ── GOST engine для поддержки ГОСТ-шифрования (rosreestr.gov.ru и др.) ──
       - name: Cache GOST engine (Android)
         id: gost-cache
         uses: actions/cache@v4
         with:
           path: third_party/gost-engine
-          key: gost-engine-android-arm64-v1
+          key: gost-engine-android-arm64-v3-${{ env.OPENSSL_VERSION }}
 
       - name: Build GOST engine for Android (arm64)
         if: steps.gost-cache.outputs.cache-hit != 'true'
-        continue-on-error: true
         env:
           ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
           OPENSSL_ROOT: ${{ github.workspace }}/third_party/openssl/install/android-arm64
         run: |
-          bash scripts/build-gost-engine-android.sh arm64
+          bash scripts/build-gost-engine-android.sh arm64 || {
+            echo "::warning::GOST engine build failed - APK will be built without ГОСТ TLS support"
+            echo "rosreestr.gov.ru and similar GOST-only sites won't be accessible"
+            # Make a marker so the build.rs knows GOST is not available
+            mkdir -p third_party/gost-engine/install/android-arm64/lib
+            touch third_party/gost-engine/install/android-arm64/.build-failed
+            exit 0
+          }
+
+      - name: Verify GOST engine status
+        run: |
+          if [ -f third_party/gost-engine/install/android-arm64/lib/libgost_provider_static.a ]; then
+            echo "✓ GOST engine library built successfully"
+            ls -la third_party/gost-engine/install/android-arm64/lib/
+          elif [ -f third_party/gost-engine/install/android-arm64/.build-failed ]; then
+            echo "⚠ GOST engine build failed - continuing without GOST support"
+          else
+            echo "⚠ GOST engine not built and no marker found"
+          fi
 
       - name: Rust unit tests (mock-core, host)
         working-directory: src-tauri

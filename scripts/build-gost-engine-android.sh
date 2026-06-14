@@ -1,24 +1,35 @@
 #!/usr/bin/env bash
-# build-gost-engine-android.sh — собирает GOST-провайдер (gost-engine) для
-# OpenSSL 3.x как статическую библиотеку для Android.
+# build-gost-engine-android.sh — собирает gost-engine (provider + engine)
+# для OpenSSL 3.x как статические библиотеки для Android.
 #
-# Результат: third_party/gost-engine/install/android-<abi>/lib/libgostprov.a
-#            third_party/gost-engine/install/android-<abi>/include/gost_provider_init.h
+# Особенности:
+# 1. Сборка через CMake с принудительными путями к Android OpenSSL.
+# 2. Переименование символа `OSSL_provider_init` → `gost_provider_init`
+#    через `llvm-objcopy --redefine-sym`, чтобы избежать конфликта при
+#    статической линковке нескольких провайдеров.
+# 3. Объединение всех .o в один большой архив libgost_provider_static.a.
+#
+# Результат:
+#   third_party/gost-engine/install/android-<abi>/
+#     ├── lib/libgost_provider_static.a   (provider, переименованный init)
+#     └── include/gost_provider_init.h    (declaration)
 #
 # Использование:
-#   ./scripts/build-gost-engine-android.sh          # arm64 (по умолчанию)
+#   ./scripts/build-gost-engine-android.sh             # arm64 по умолчанию
 #   ./scripts/build-gost-engine-android.sh arm64
 #
 # Переменные окружения:
-#   ANDROID_NDK_ROOT   путь до NDK
+#   ANDROID_NDK_ROOT   путь до NDK r26+
 #   OPENSSL_ROOT       путь до собранного OpenSSL (third_party/openssl/install/android-arm64)
 #   MIN_SDK            минимальный Android API (по умолчанию 26)
-#   JOBS               кол-во потоков make
+#   GOST_BRANCH        ветка gost-engine (по умолчанию openssl_3_0)
+#   JOBS               параллелизм make
 
 set -euo pipefail
 
 MIN_SDK="${MIN_SDK:-26}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+GOST_BRANCH="${GOST_BRANCH:-openssl_3_0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -28,7 +39,7 @@ INSTALL_ROOT="${THIRD_PARTY}/gost-engine/install"
 
 mkdir -p "${THIRD_PARTY}" "${INSTALL_ROOT}"
 
-# ---------- NDK --------------------------------------------------------------
+# ---------- NDK ----------
 if [ -z "${ANDROID_NDK_ROOT:-}" ]; then
   if [ -n "${ANDROID_NDK_HOME:-}" ]; then
     ANDROID_NDK_ROOT="${ANDROID_NDK_HOME}"
@@ -37,60 +48,67 @@ if [ -z "${ANDROID_NDK_ROOT:-}" ]; then
     ANDROID_NDK_ROOT="${ANDROID_NDK_ROOT%/}"
   fi
 fi
-if [ -z "${ANDROID_NDK_ROOT:-}" ] || [ ! -d "${ANDROID_NDK_ROOT}" ]; then
-  echo "ERROR: ANDROID_NDK_ROOT is not set or invalid" >&2
-  exit 1
-fi
+[ -d "${ANDROID_NDK_ROOT:-}" ] || { echo "ERROR: ANDROID_NDK_ROOT not set"; exit 1; }
 export ANDROID_NDK_ROOT
 echo "Using NDK: ${ANDROID_NDK_ROOT}"
 
-# ---------- Host tag ---------------------------------------------------------
 case "$(uname -s)" in
   Linux*)   HOST_TAG="linux-x86_64" ;;
   Darwin*)  HOST_TAG="darwin-x86_64" ;;
-  *)        echo "ERROR: unsupported host OS" >&2; exit 1 ;;
+  *)        echo "ERROR: unsupported host OS"; exit 1 ;;
 esac
 TOOLCHAIN="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/${HOST_TAG}"
+[ -d "${TOOLCHAIN}" ] || { echo "ERROR: toolchain not found: ${TOOLCHAIN}"; exit 1; }
 
-# ---------- Исходники gost-engine -------------------------------------------
-GOST_BRANCH="openssl_3.0"
+# ---------- Источники gost-engine ----------
 if [ ! -d "${SRC_DIR}" ]; then
   echo "Cloning gost-engine (${GOST_BRANCH}) ..."
   git clone --depth 1 --branch "${GOST_BRANCH}" \
-    https://github.com/gost-engine/engine.git "${SRC_DIR}"
-else
-  echo "Using existing gost-engine source at ${SRC_DIR}"
+    https://github.com/gost-engine/engine.git "${SRC_DIR}" || {
+      echo "WARN: branch '${GOST_BRANCH}' not found, falling back to master"
+      git clone --depth 1 https://github.com/gost-engine/engine.git "${SRC_DIR}"
+    }
 fi
 
-# ---------- Сборка -----------------------------------------------------------
+# ---------- Сборка одной ABI ----------
 build_one() {
   local abi="$1"
   local target_triple=""
+  local cmake_abi=""
   local openssl_prefix=""
 
   case "${abi}" in
     arm64)
       target_triple="aarch64-linux-android"
+      cmake_abi="arm64-v8a"
       openssl_prefix="${OPENSSL_ROOT:-${THIRD_PARTY}/openssl/install/android-arm64}"
       ;;
     x86_64)
       target_triple="x86_64-linux-android"
+      cmake_abi="x86_64"
       openssl_prefix="${OPENSSL_ROOT:-${THIRD_PARTY}/openssl/install/android-x86_64}"
       ;;
     *)
-      echo "ERROR: unsupported ABI '${abi}'" >&2; exit 1 ;;
+      echo "ERROR: unsupported ABI '${abi}'"; exit 1 ;;
   esac
 
   local prefix="${INSTALL_ROOT}/android-${abi}"
+  local build_dir="${THIRD_PARTY}/gost-engine-build-${abi}"
 
-  if [ -f "${prefix}/lib/libgost_core.a" ]; then
+  # Проверяем зависимости
+  [ -f "${openssl_prefix}/lib/libcrypto.a" ] || {
+    echo "ERROR: OpenSSL not built at ${openssl_prefix}"
+    echo "Run scripts/build-openssl-android.sh ${abi} first"
+    exit 1
+  }
+
+  # Кеш: уже собран?
+  if [ -f "${prefix}/lib/libgost_provider_static.a" ]; then
     echo "── [${abi}] already built, skipping"
     return 0
   fi
 
-  echo "── [${abi}] building gost-engine → ${prefix}"
-
-  local build_dir="${THIRD_PARTY}/gost-engine-build-${abi}"
+  echo "── [${abi}] building gost-engine for OpenSSL @ ${openssl_prefix}"
   rm -rf "${build_dir}"
   mkdir -p "${build_dir}" "${prefix}/lib" "${prefix}/include"
 
@@ -98,68 +116,118 @@ build_one() {
   local CXX="${TOOLCHAIN}/bin/${target_triple}${MIN_SDK}-clang++"
   local AR="${TOOLCHAIN}/bin/llvm-ar"
   local RANLIB="${TOOLCHAIN}/bin/llvm-ranlib"
+  local OBJCOPY="${TOOLCHAIN}/bin/llvm-objcopy"
+  local NM="${TOOLCHAIN}/bin/llvm-nm"
 
+  # CMake configure
   cmake -S "${SRC_DIR}" -B "${build_dir}" \
     -DCMAKE_SYSTEM_NAME=Android \
     -DCMAKE_ANDROID_NDK="${ANDROID_NDK_ROOT}" \
-    -DCMAKE_ANDROID_ARCH_ABI="$([ "${abi}" = "arm64" ] && echo "arm64-v8a" || echo "x86_64")" \
-    -DCMAKE_ANDROID_NDK_TOOLCHAIN_VERSION=clang \
+    -DCMAKE_ANDROID_ARCH_ABI="${cmake_abi}" \
     -DCMAKE_SYSTEM_VERSION="${MIN_SDK}" \
+    -DCMAKE_ANDROID_STL_TYPE=c++_static \
     -DCMAKE_C_COMPILER="${CC}" \
     -DCMAKE_CXX_COMPILER="${CXX}" \
     -DCMAKE_AR="${AR}" \
     -DCMAKE_RANLIB="${RANLIB}" \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DOPENSSL_ROOT_DIR="${openssl_prefix}" \
     -DOPENSSL_INCLUDE_DIR="${openssl_prefix}/include" \
     -DOPENSSL_CRYPTO_LIBRARY="${openssl_prefix}/lib/libcrypto.a" \
+    -DOPENSSL_SSL_LIBRARY="${openssl_prefix}/lib/libssl.a" \
+    -DOPENSSL_USE_STATIC_LIBS=ON \
     -DBUILD_SHARED_LIBS=OFF \
-    -DCMAKE_INSTALL_PREFIX="${prefix}" \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+    -DSKIP_PERL_TESTS=ON \
+    -DENABLE_PROGRAMS=OFF \
+    -DCMAKE_INSTALL_PREFIX="${prefix}" 2>&1 | tee "${build_dir}/cmake_configure.log"
 
-  cmake --build "${build_dir}" -j "${JOBS}" --target gost_core 2>/dev/null || \
-  cmake --build "${build_dir}" -j "${JOBS}" --target gost_prov 2>/dev/null || \
-  cmake --build "${build_dir}" -j "${JOBS}" 2>&1 | tail -30
+  # Билдим всё что получится (provider + engine)
+  echo "── [${abi}] cmake --build (this may take a while) ..."
+  cmake --build "${build_dir}" -j "${JOBS}" 2>&1 | tee "${build_dir}/cmake_build.log" | tail -50 || {
+    echo "WARN: full build had errors; will try to salvage .o files"
+  }
 
-  # Копируем нужные артефакты (.a и .o)
-  find "${build_dir}" -name "*.a" -exec cp {} "${prefix}/lib/" \;
-  
-  # Если .a не нашлись — попробуем собрать из .o
-  if ! ls "${prefix}/lib/"*.a 1>/dev/null 2>&1; then
-    echo "── [${abi}] no .a found, trying to build from .o files"
-    find "${build_dir}" -name "*.o" | head -100 | xargs "${AR}" rcs "${prefix}/lib/libgost_prov.a" 2>/dev/null || true
+  # ── Собираем все .o из CMakeFiles ──
+  local objs_list="${build_dir}/all_objs.txt"
+  find "${build_dir}/CMakeFiles" -name '*.o' \
+    ! -path '*/test*' \
+    ! -path '*/CMakeTmp*' \
+    ! -name 'test_*' \
+    > "${objs_list}" 2>/dev/null || true
+
+  local total_objs
+  total_objs=$(wc -l < "${objs_list}" | tr -d ' ')
+  echo "── [${abi}] found ${total_objs} object files"
+
+  if [ "${total_objs}" -lt 5 ]; then
+    echo "ERROR: too few object files (${total_objs}); build likely failed"
+    echo "── cmake configure log (last 40 lines) ──"
+    tail -40 "${build_dir}/cmake_configure.log" 2>/dev/null || true
+    echo "── cmake build log (last 60 lines) ──"
+    tail -60 "${build_dir}/cmake_build.log" 2>/dev/null || true
+    return 1
   fi
 
-  # Ищем правильное имя init-функции в собранных объектах
-  local INIT_FUNC="ossl_gost_provider_init"
-  if command -v nm >/dev/null 2>&1; then
-    local found_func
-    found_func=$(find "${prefix}/lib" -name "*.a" -exec nm {} \; 2>/dev/null | grep -o '[A-Za-z_]*provider_init' | head -1 || true)
-    if [ -n "${found_func}" ]; then
-      INIT_FUNC="${found_func}"
+  # ── Переименовываем символ OSSL_provider_init → gost_provider_init ──
+  # Нужно чтобы избежать конфликта при статической линковке с другими
+  # провайдерами OpenSSL (default, legacy).
+  echo "── [${abi}] renaming OSSL_provider_init → gost_provider_init"
+  local renamed=0
+  while IFS= read -r objfile; do
+    [ -f "${objfile}" ] || continue
+    if "${NM}" "${objfile}" 2>/dev/null | grep -q " T OSSL_provider_init"; then
+      "${OBJCOPY}" --redefine-sym OSSL_provider_init=gost_provider_init "${objfile}"
+      echo "    renamed in: $(basename "${objfile}")"
+      renamed=$((renamed + 1))
     fi
+  done < "${objs_list}"
+
+  if [ "${renamed}" -eq 0 ]; then
+    echo "WARN: no OSSL_provider_init found in any .o file"
+    echo "Searching for any *provider_init* symbols:"
+    while IFS= read -r objfile; do
+      "${NM}" "${objfile}" 2>/dev/null | grep -i "provider_init" || true
+    done < "${objs_list}" | sort -u | head -20
   fi
 
-  # Создаём заголовок для вызова init
-  cat > "${prefix}/include/gost_provider_init.h" <<EOF
+  # ── Создаём финальный архив ──
+  local final_lib="${prefix}/lib/libgost_provider_static.a"
+  rm -f "${final_lib}"
+  echo "── [${abi}] creating archive ${final_lib}"
+
+  # ar @file syntax — читает имена .o из файла
+  if ! "${AR}" rcs "${final_lib}" @"${objs_list}" 2>/dev/null; then
+    echo "    ar @file failed, using xargs"
+    < "${objs_list}" xargs "${AR}" rcs "${final_lib}"
+  fi
+  "${RANLIB}" "${final_lib}" || true
+
+  # Заголовок
+  cat > "${prefix}/include/gost_provider_init.h" <<'EOF'
+/* Auto-generated by build-gost-engine-android.sh */
 #ifndef GOST_PROVIDER_INIT_H
 #define GOST_PROVIDER_INIT_H
+
 #include <openssl/core.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Entry point for gost-engine provider (OpenSSL 3.x provider init function).
- * Used with OSSL_PROVIDER_add_builtin() for static linking.
- * Detected function name: ${INIT_FUNC} */
-int ${INIT_FUNC}(const OSSL_CORE_HANDLE *handle,
-                 const OSSL_DISPATCH *in,
-                 const OSSL_DISPATCH **out,
-                 void **provctx);
-
-/* Alias for code that uses the canonical name */
-#define ossl_gost_provider_init ${INIT_FUNC}
+/*
+ * Entry point for the statically-linked gost-engine provider.
+ *
+ * Symbol was renamed at build time from `OSSL_provider_init` to
+ * `gost_provider_init` via `llvm-objcopy --redefine-sym` to avoid clashes
+ * with other statically-linked OpenSSL providers (default, legacy).
+ *
+ * Used with OSSL_PROVIDER_add_builtin(libctx, "gost", gost_provider_init).
+ */
+int gost_provider_init(const OSSL_CORE_HANDLE *handle,
+                       const OSSL_DISPATCH *in,
+                       const OSSL_DISPATCH **out,
+                       void **provctx);
 
 #ifdef __cplusplus
 }
@@ -168,14 +236,24 @@ int ${INIT_FUNC}(const OSSL_CORE_HANDLE *handle,
 #endif /* GOST_PROVIDER_INIT_H */
 EOF
 
+  # ── Проверка ──
+  echo "── [${abi}] verifying archive"
+  if "${NM}" "${final_lib}" 2>/dev/null | grep -q " T gost_provider_init"; then
+    echo "    ✓ gost_provider_init found"
+  else
+    echo "    ✗ WARN: gost_provider_init NOT found in archive"
+    echo "    Available T symbols (first 30):"
+    "${NM}" "${final_lib}" 2>/dev/null | grep " T " | head -30 || true
+  fi
+
+  ls -la "${prefix}/lib/" || true
   echo "── [${abi}] done"
-  ls -la "${prefix}/lib/"*.a 2>/dev/null || true
 }
 
-# ---------- Запуск -----------------------------------------------------------
+# ---------- Main ----------
 ABI="${1:-arm64}"
 build_one "${ABI}"
 
 echo
-echo "GOST engine build complete."
-find "${INSTALL_ROOT}" -name "*.a" -print | sort
+echo "=== GOST engine build complete ==="
+find "${INSTALL_ROOT}" -name "*.a" -print

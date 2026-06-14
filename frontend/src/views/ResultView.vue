@@ -196,6 +196,7 @@ async function copyText(text: string | undefined) {
         <div class="tls-badge">
           <span class="tls-version">{{ data.tlsVersion }}</span>
           <span class="tls-cipher">{{ formatCipher(data.tlsCipher) }}</span>
+          <span v-if="data.isGostCipher" class="gost-badge" title="ГОСТ-шифрование">🇷🇺 ГОСТ</span>
         </div>
       </section>
 
@@ -491,6 +492,18 @@ async function copyText(text: string | undefined) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.gost-badge {
+  background: linear-gradient(135deg, #d52b1e, #fff, #0039a6);
+  color: #1a1a1a;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  border: 1px solid #d1d5db;
+  text-shadow: 0 0 2px rgba(255, 255, 255, 0.8);
 }
 
 .status-card {

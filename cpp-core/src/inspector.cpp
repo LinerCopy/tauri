@@ -135,6 +135,9 @@ std::string build_error_response(const std::string& request_id,
         {"inputUrl", input_url},
         {"resolvedHost", ""},
         {"tlsVersion", ""},
+        {"tlsCipher", ""},
+        {"isGostCipher", false},
+        {"gostSupported", gci::gost_provider_loaded()},
         {"certificate", nullptr},
         {"chain", json::array()},
         {"validation", {
@@ -369,6 +372,10 @@ const char* inspect_url(const char* request_json) {
         {"resolvedHost", parsed.host},
         {"tlsVersion", conn.negotiated_version},
         {"tlsCipher", conn.negotiated_cipher},
+        {"isGostCipher", conn.negotiated_cipher.find("GOST") != std::string::npos ||
+                         conn.negotiated_cipher.find("KUZNYECHIK") != std::string::npos ||
+                         conn.negotiated_cipher.find("MAGMA") != std::string::npos},
+        {"gostSupported", gci::gost_provider_loaded()},
         {"certificate", peer ? cert_to_json(end_entity) : json(nullptr)},
         {"chain", json::array()},
         {"validation", {

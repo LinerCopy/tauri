@@ -250,8 +250,16 @@ fn resolve_gost_engine_root(target: &str, manifest_dir: &Path) -> Option<PathBuf
     // 1. Explicit env var
     if let Ok(root) = env::var("GOST_ENGINE_ROOT") {
         let p = PathBuf::from(root);
-        if p.join("lib").exists() {
-            return Some(p);
+        if !p.join(".build-failed").exists() && p.join("lib").exists() {
+            // Check there's actually a .a in lib
+            if std::fs::read_dir(p.join("lib"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().ends_with(".a"))
+            {
+                return Some(p);
+            }
         }
     }
 
@@ -269,7 +277,19 @@ fn resolve_gost_engine_root(target: &str, manifest_dir: &Path) -> Option<PathBuf
         .join("install")
         .join(subdir);
 
-    if candidate.join("lib").exists() {
+    if candidate.join(".build-failed").exists() {
+        println!("cargo:warning=gci-app: GOST engine build was marked as failed, skipping");
+        return None;
+    }
+
+    // Must have at least one .a file
+    let has_lib = std::fs::read_dir(candidate.join("lib"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().ends_with(".a"));
+
+    if has_lib {
         println!(
             "cargo:warning=gci-app: auto-detected GOST engine at {}",
             candidate.display()

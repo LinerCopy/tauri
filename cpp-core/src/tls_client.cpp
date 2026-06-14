@@ -12,26 +12,58 @@
 #include <cctype>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <sstream>
 
 namespace gci {
+
+// ── GOST provider status (для inspector.cpp) ──
+bool gost_provider_loaded() {
+#ifdef GCI_GOST_ENABLED
+    return OSSL_PROVIDER_available(nullptr, "gost") == 1;
+#else
+    return false;
+#endif
+}
 
 namespace {
 
 // ── GOST provider initialization (один раз) ──
 void ensure_gost_provider() {
 #ifdef GCI_GOST_ENABLED
-    static bool loaded = false;
-    if (loaded) return;
-    loaded = true;
+    static bool initialized = false;
+    static std::mutex init_mutex;
+    std::lock_guard<std::mutex> lock(init_mutex);
+    if (initialized) return;
+    initialized = true;
 
-    // Загружаем стандартный providerдля обычных алгоритмов
-    OSSL_PROVIDER_load(nullptr, "default");
-
-    // Регистрируем GOST как встроенный (статически слинкованный) provider
-    if (OSSL_PROVIDER_add_builtin(nullptr, "gostprov", ossl_gost_provider_init) == 1) {
-        OSSL_PROVIDER_load(nullptr, "gostprov");
+    // 1. Default provider — содержит стандартные AES/RSA/SHA алгоритмы.
+    //    Без него ничего не работает в OpenSSL 3.x.
+    OSSL_PROVIDER* default_prov = OSSL_PROVIDER_load(nullptr, "default");
+    if (!default_prov) {
+        // Критично, но не фатально — try to continue
+        ERR_clear_error();
     }
+
+    // 2. Legacy provider — нужен для некоторых старых алгоритмов которые
+    //    использует gost-engine (MD5, RIPEMD160 и др.)
+    OSSL_PROVIDER_load(nullptr, "legacy");
+    ERR_clear_error();
+
+    // 3. Наш GOST provider, статически слинкованный.
+    //    Имя символа init-функции переименовано из OSSL_provider_init
+    //    в gost_provider_init на этапе сборки (см. build-gost-engine-android.sh).
+    if (OSSL_PROVIDER_add_builtin(nullptr, "gost", gost_provider_init) != 1) {
+        ERR_clear_error();
+        return;
+    }
+
+    OSSL_PROVIDER* gost_prov = OSSL_PROVIDER_load(nullptr, "gost");
+    if (!gost_prov) {
+        ERR_clear_error();
+        return;
+    }
+    // gost_prov загружен — теперь будут доступны ГОСТ-алгоритмы и cipher suites.
 #endif
 }
 
