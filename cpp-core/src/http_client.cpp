@@ -68,10 +68,36 @@ bool HttpClient::get(BIO* bio,
                 error = "HTTP headers too large";
                 return false;
             }
+        } else if (rc == 0) {
+            // EOF до окончания заголовков — сервер закрыл соединение.
+            // Это бывает с VPN/прокси/CDN. Если хоть что-то прочитали — пробуем парсить.
+            if (!raw.empty()) {
+                header_end = raw.find("\r\n\r\n");
+                if (header_end == std::string::npos) header_end = raw.find("\n\n");
+                if (header_end == std::string::npos) {
+                    // Не удалось найти конец заголовков — просто отдаём что есть как body.
+                    out.body = raw;
+                    out.status_code = 0;
+                    return true;
+                }
+            }
+            break;
         } else {
             if (BIO_should_retry(bio)) continue;
-            error = "BIO_read failed before headers complete";
-            return false;
+            // Ошибка чтения. Если что-то уже прочитали — пробуем парсить.
+            if (!raw.empty()) {
+                header_end = raw.find("\r\n\r\n");
+                if (header_end == std::string::npos) header_end = raw.find("\n\n");
+                if (header_end == std::string::npos) {
+                    out.body = raw;
+                    out.status_code = 0;
+                    return true;
+                }
+            } else {
+                error = "BIO_read failed before headers complete";
+                return false;
+            }
+            break;
         }
     }
 

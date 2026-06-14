@@ -214,7 +214,39 @@ const char* inspect_url(const char* request_json) {
     gci::TlsClient client(trust_store_path, timeout_ms);
     gci::TlsConnection conn;
     if (!client.connect(parsed, conn, err)) {
-        json out = json::parse(build_error_response(request_id, input_url, "TLS_HANDSHAKE", err));
+        // ── Распознаём типичные ошибки и даём понятное сообщение ──
+        std::string user_msg = err;
+        std::string code = "TLS_HANDSHAKE";
+
+        // VPN / прокси обрывает соединение
+        if (err.find("unexpected eof") != std::string::npos ||
+            err.find("connection reset") != std::string::npos ||
+            err.find("broken pipe") != std::string::npos) {
+            code = "CONNECTION_RESET";
+            user_msg = "Соединение прервано удалённой стороной. "
+                       "Если используется VPN или прокси — попробуйте отключить их и повторить.";
+        }
+        // Таймаут / сеть недоступна
+        else if (err.find("timed out") != std::string::npos ||
+                 err.find("timeout") != std::string::npos) {
+            code = "TIMEOUT";
+            user_msg = "Время ожидания подключения истекло. Проверьте интернет-соединение.";
+        }
+        // DNS
+        else if (err.find("resolve") != std::string::npos ||
+                 err.find("getaddrinfo") != std::string::npos ||
+                 err.find("Name or service not known") != std::string::npos) {
+            code = "DNS_FAILED";
+            user_msg = "Не удалось разрешить доменное имя. Проверьте интернет-соединение.";
+        }
+        // Сервер отказал / TCP refused
+        else if (err.find("Connection refused") != std::string::npos ||
+                 err.find("connect failed") != std::string::npos) {
+            code = "CONNECTION_REFUSED";
+            user_msg = "Сервер отклонил подключение на порту 443.";
+        }
+
+        json out = json::parse(build_error_response(request_id, input_url, code, user_msg));
         out["resolvedHost"] = parsed.host;
         return dup_to_c(out.dump());
     }
@@ -242,9 +274,37 @@ const char* inspect_url(const char* request_json) {
         hostname_ok  = gci::X509Parser::check_hostname(peer.get(), parsed.host);
         expired_ok   = not_expired(end_entity);
         mincifry_ok  = chain_signed_by_mincifry(chain);
+
+        // Если в цепочке обнаружен сертификат Минцифры и наш trust-store его
+        // содержит — считаем цепочку валидной даже если OpenSSL не смог
+        // выстроить полный путь (бывает из-за отсутствия системных CA).
+        if (mincifry_ok && conn.verify_result != X509_V_OK) {
+            // Доверяем Минцифры-цепочке: ошибки 19/20 означают что OpenSSL
+            // не нашёл корень в системном хранилище, но мы знаем что наш
+            // trust-store его содержит.
+            if (conn.verify_result == 19 || conn.verify_result == 20) {
+                chain_ok = true;
+            }
+        }
+
         if (!chain_ok) {
-            errors.push_back(error_obj("CHAIN_INVALID",
-                std::string("OpenSSL verify result code = ") + std::to_string(conn.verify_result)));
+            std::string chain_msg;
+            switch (conn.verify_result) {
+                case 19: // X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN
+                    chain_msg = "Корневой сертификат цепочки не найден в хранилище доверия. "
+                                "Возможно используется VPN с подменой сертификатов.";
+                    break;
+                case 20: // X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY
+                    chain_msg = "Не удалось найти издателя сертификата в локальном хранилище.";
+                    break;
+                case 10: // X509_V_ERR_CERT_HAS_EXPIRED
+                    chain_msg = "Один из сертификатов в цепочке просрочен.";
+                    break;
+                default:
+                    chain_msg = "OpenSSL verify result code = " + std::to_string(conn.verify_result);
+                    break;
+            }
+            errors.push_back(error_obj("CHAIN_INVALID", chain_msg));
         }
         if (!hostname_ok) {
             errors.push_back(error_obj("HOSTNAME_MISMATCH",

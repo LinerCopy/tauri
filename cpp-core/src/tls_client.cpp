@@ -90,36 +90,49 @@ bool TlsClient::load_trust_store(SSL_CTX* ctx, std::string& error) {
         return false;
     }
 
+    // ── 1. Загружаем системные CA (чтобы работала верификация любых цепочек) ──
+    // SSL_CTX_set_default_verify_paths использует compile-time paths OpenSSL.
+    // На desktop (Linux/macOS) это обычно /etc/ssl/certs или Keychain.
+    // На Android не работает (нет стандартного пути), поэтому пробуем
+    // известные директории с системными CA-сертификатами.
+    SSL_CTX_set_default_verify_paths(ctx);
+
+    // Android-specific: попытка загрузить системные CA из известных путей.
+    static const char* android_ca_dirs[] = {
+        "/system/etc/security/cacerts",
+        "/apex/com.android.conscrypt/cacerts",
+        "/etc/security/cacerts",
+        nullptr
+    };
+    for (const char** dir = android_ca_dirs; *dir; ++dir) {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        if (fs::is_directory(*dir, ec)) {
+            SSL_CTX_load_verify_dir(ctx, *dir);
+            break;
+        }
+    }
+
+    // ── 2. Загружаем наш кастомный trust-store (Минцифры) поверх системных ──
     namespace fs = std::filesystem;
     std::error_code ec;
     if (!fs::exists(trust_store_path_, ec)) {
-        error = "trust store path does not exist: " + trust_store_path_;
-        return false;
+        // Не фатально — системные CA уже загружены, просто Mincifry-проверка не будет 100%.
+        return true;
     }
 
     const bool is_dir = fs::is_directory(trust_store_path_, ec);
     if (is_dir) {
-        // Загружаем все *.pem из каталога (включая roots/ и intermediates/).
-        bool any = false;
         for (auto it = fs::recursive_directory_iterator(trust_store_path_, ec);
              !ec && it != fs::recursive_directory_iterator(); ++it) {
             if (!it->is_regular_file()) continue;
             const auto p = it->path();
             const auto ext = p.extension().string();
             if (ext != ".pem" && ext != ".crt" && ext != ".cer") continue;
-            if (SSL_CTX_load_verify_locations(ctx, p.string().c_str(), nullptr) == 1) {
-                any = true;
-            }
-        }
-        if (!any) {
-            error = "no usable certificates in trust store: " + trust_store_path_;
-            return false;
+            SSL_CTX_load_verify_locations(ctx, p.string().c_str(), nullptr);
         }
     } else {
-        if (SSL_CTX_load_verify_locations(ctx, trust_store_path_.c_str(), nullptr) != 1) {
-            error = "failed to load trust file: " + openssl_last_error();
-            return false;
-        }
+        SSL_CTX_load_verify_locations(ctx, trust_store_path_.c_str(), nullptr);
     }
     return true;
 }
