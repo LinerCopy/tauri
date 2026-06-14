@@ -63,11 +63,17 @@ TOOLCHAIN="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/${HOST_TAG}"
 # ---------- Источники gost-engine ----------
 if [ ! -d "${SRC_DIR}" ]; then
   echo "Cloning gost-engine (${GOST_BRANCH}) ..."
-  git clone --depth 1 --branch "${GOST_BRANCH}" \
+  # --recurse-submodules is required: libprov is a submodule in master branch
+  git clone --depth 1 --recurse-submodules --shallow-submodules \
+    --branch "${GOST_BRANCH}" \
     https://github.com/gost-engine/engine.git "${SRC_DIR}" || {
       echo "WARN: branch '${GOST_BRANCH}' not found, falling back to master"
-      git clone --depth 1 https://github.com/gost-engine/engine.git "${SRC_DIR}"
+      git clone --depth 1 --recurse-submodules --shallow-submodules \
+        https://github.com/gost-engine/engine.git "${SRC_DIR}"
     }
+else
+  # Ensure submodules are initialised even if clone was done without them
+  git -C "${SRC_DIR}" submodule update --init --recursive --depth 1 2>/dev/null || true
 fi
 
 # ---------- Сборка одной ABI ----------
@@ -140,7 +146,13 @@ build_one() {
     -DBUILD_SHARED_LIBS=OFF \
     -DSKIP_PERL_TESTS=ON \
     -DENABLE_PROGRAMS=OFF \
-    -DCMAKE_INSTALL_PREFIX="${prefix}" 2>&1 | tee "${build_dir}/cmake_configure.log"
+    -DCMAKE_INSTALL_PREFIX="${prefix}" \
+    -DRELAXED_ALIGNMENT_EXITCODE=0 \
+    -DRELAXED_ALIGNMENT_EXITCODE__TRYRUN_OUTPUT="" \
+    -DADDCARRY_U64_EXITCODE=1 \
+    -DADDCARRY_U64_EXITCODE__TRYRUN_OUTPUT="" \
+    -Wno-dev \
+    2>&1 | tee "${build_dir}/cmake_configure.log"
 
   # Билдим всё что получится (provider + engine)
   echo "── [${abi}] cmake --build (this may take a while) ..."
