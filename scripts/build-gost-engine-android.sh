@@ -118,13 +118,30 @@ build_one() {
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON
 
   cmake --build "${build_dir}" -j "${JOBS}" --target gost_core 2>/dev/null || \
-  cmake --build "${build_dir}" -j "${JOBS}" 2>&1 | tail -20
+  cmake --build "${build_dir}" -j "${JOBS}" --target gost_prov 2>/dev/null || \
+  cmake --build "${build_dir}" -j "${JOBS}" 2>&1 | tail -30
 
-  # Копируем нужные артефакты
+  # Копируем нужные артефакты (.a и .o)
   find "${build_dir}" -name "*.a" -exec cp {} "${prefix}/lib/" \;
+  
+  # Если .a не нашлись — попробуем собрать из .o
+  if ! ls "${prefix}/lib/"*.a 1>/dev/null 2>&1; then
+    echo "── [${abi}] no .a found, trying to build from .o files"
+    find "${build_dir}" -name "*.o" | head -100 | xargs "${AR}" rcs "${prefix}/lib/libgost_prov.a" 2>/dev/null || true
+  fi
+
+  # Ищем правильное имя init-функции в собранных объектах
+  local INIT_FUNC="ossl_gost_provider_init"
+  if command -v nm >/dev/null 2>&1; then
+    local found_func
+    found_func=$(find "${prefix}/lib" -name "*.a" -exec nm {} \; 2>/dev/null | grep -o '[A-Za-z_]*provider_init' | head -1 || true)
+    if [ -n "${found_func}" ]; then
+      INIT_FUNC="${found_func}"
+    fi
+  fi
 
   # Создаём заголовок для вызова init
-  cat > "${prefix}/include/gost_provider_init.h" <<'EOF'
+  cat > "${prefix}/include/gost_provider_init.h" <<EOF
 #ifndef GOST_PROVIDER_INIT_H
 #define GOST_PROVIDER_INIT_H
 #include <openssl/core.h>
@@ -134,11 +151,15 @@ extern "C" {
 #endif
 
 /* Entry point for gost-engine provider (OpenSSL 3.x provider init function).
- * Used with OSSL_PROVIDER_add_builtin() for static linking. */
-int ossl_gost_provider_init(const OSSL_CORE_HANDLE *handle,
-                            const OSSL_DISPATCH *in,
-                            const OSSL_DISPATCH **out,
-                            void **provctx);
+ * Used with OSSL_PROVIDER_add_builtin() for static linking.
+ * Detected function name: ${INIT_FUNC} */
+int ${INIT_FUNC}(const OSSL_CORE_HANDLE *handle,
+                 const OSSL_DISPATCH *in,
+                 const OSSL_DISPATCH **out,
+                 void **provctx);
+
+/* Alias for code that uses the canonical name */
+#define ossl_gost_provider_init ${INIT_FUNC}
 
 #ifdef __cplusplus
 }

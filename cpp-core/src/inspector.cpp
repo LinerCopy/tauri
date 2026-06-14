@@ -249,16 +249,18 @@ const char* inspect_url(const char* request_json) {
         else if (err.find("no shared cipher") != std::string::npos ||
                  err.find("no ciphers available") != std::string::npos ||
                  err.find("no protocols available") != std::string::npos ||
-                 err.find("sslv3 alert handshake failure") != std::string::npos) {
+                 err.find("sslv3 alert handshake failure") != std::string::npos ||
+                 err.find("handshake failure") != std::string::npos) {
 #ifdef GCI_GOST_ENABLED
             code = "TLS_CIPHER_MISMATCH";
             user_msg = "Не удалось согласовать шифр с сервером. "
-                       "Сайт может использовать нестандартную конфигурацию TLS.";
+                       "ГОСТ-поддержка активна, но сервер может требовать "
+                       "дополнительную конфигурацию (например, клиентский сертификат).";
 #else
             code = "GOST_UNSUPPORTED";
-            user_msg = "Сайт использует ГОСТ-шифрование (российский стандарт). "
-                       "Поддержка ГОСТ включена — если ошибка повторяется, "
-                       "возможно сервер требует особую конфигурацию TLS.";
+            user_msg = "Сайт использует только ГОСТ-шифрование (российский стандарт). "
+                       "В текущей сборке поддержка ГОСТ отсутствует — "
+                       "сертификат этого сайта нельзя проверить.";
 #endif
         }
 

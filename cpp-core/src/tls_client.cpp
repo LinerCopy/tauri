@@ -177,21 +177,36 @@ bool TlsClient::connect(const ParsedUrl& url, TlsConnection& out, std::string& e
         SSL_OP_NO_COMPRESSION |
         SSL_OP_CIPHER_SERVER_PREFERENCE);
 
-    // Разрешаем все «нормальные» шифры + ГОСТ (если провайдер загружен).
-    // OpenSSL игнорирует неизвестные имена в списке — если ГОСТ провайдер
-    // не слинкован, ГОСТ-шифры просто пропускаются.
-    SSL_CTX_set_cipher_list(out.ctx.get(),
-        "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM"
-        ":GOST2012-GOST8912-GOST8912:GOST2001-GOST89-GOST89"
-        ":!aNULL:!eNULL:!MD5:!RC4:!3DES");
-    SSL_CTX_set_ciphersuites(out.ctx.get(),
-        "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256"
-        ":TLS_GOSTR341112_256_WITH_KUZNYECHIK_CTR_OMAC"
-        ":TLS_GOSTR341112_256_WITH_MAGMA_CTR_OMAC"
-        ":TLS_GOSTR341112_256_WITH_KUZNYECHIK_MGM_L"
-        ":TLS_GOSTR341112_256_WITH_MAGMA_MGM_L"
-        ":TLS_GOSTR341112_256_WITH_KUZNYECHIK_MGM_S"
-        ":TLS_GOSTR341112_256_WITH_MAGMA_MGM_S");
+    // Разрешаем широкий набор шифров для максимальной совместимости с
+    // гос-сайтами. Некоторые российские серверы поддерживают только RSA
+    // key exchange (без ECDHE). ГОСТ-шифры добавлены на случай наличия
+    // gost-engine — если провайдер не загружен, OpenSSL их просто пропустит.
+    //
+    // ВАЖНО: SSL_CTX_set_cipher_list возвращает 0 если ВСЕ шифры невалидны,
+    // но не ломается если часть строк нераспознана (ГОСТ без провайдера).
+    if (SSL_CTX_set_cipher_list(out.ctx.get(),
+            "HIGH:MEDIUM"
+            ":GOST2012-GOST8912-GOST8912:GOST2001-GOST89-GOST89"
+            ":!aNULL:!eNULL:!MD5:!RC4:!3DES:!EXPORT:!DES:!PSK:!SRP") != 1) {
+        // Fallback без ГОСТ
+        SSL_CTX_set_cipher_list(out.ctx.get(), "HIGH:MEDIUM:!aNULL:!eNULL:!MD5:!RC4:!3DES:!EXPORT");
+    }
+
+    // TLS 1.3 cipher suites. ГОСТ TLS 1.3 шифры добавляем через отдельный
+    // вызов, чтобы ошибка не сломала стандартные. Если set_ciphersuites
+    // вернёт 0 (нераспознанные ГОСТ-имена), пробуем только стандартные.
+    if (SSL_CTX_set_ciphersuites(out.ctx.get(),
+            "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256"
+            ":TLS_GOSTR341112_256_WITH_KUZNYECHIK_CTR_OMAC"
+            ":TLS_GOSTR341112_256_WITH_MAGMA_CTR_OMAC"
+            ":TLS_GOSTR341112_256_WITH_KUZNYECHIK_MGM_L"
+            ":TLS_GOSTR341112_256_WITH_MAGMA_MGM_L"
+            ":TLS_GOSTR341112_256_WITH_KUZNYECHIK_MGM_S"
+            ":TLS_GOSTR341112_256_WITH_MAGMA_MGM_S") != 1) {
+        // ГОСТ TLS 1.3 не поддерживается — ставим только стандартные
+        SSL_CTX_set_ciphersuites(out.ctx.get(),
+            "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256");
+    }
 
     // Просим OpenSSL валидировать пир, но решение принимаем сами — нам нужны
     // и chain_ok=false случаи с детальной диагностикой.
