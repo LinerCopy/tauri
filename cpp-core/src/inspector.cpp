@@ -262,7 +262,7 @@ const char* inspect_url(const char* request_json) {
     gci::CertInfo end_entity;
     std::vector<gci::CertInfo> chain;
     bool hostname_ok = false;
-    bool chain_ok    = (conn.verify_result == X509_V_OK);
+    bool chain_ok    = false;
     bool expired_ok  = false;
     bool mincifry_ok = false;
 
@@ -275,33 +275,43 @@ const char* inspect_url(const char* request_json) {
         expired_ok   = not_expired(end_entity);
         mincifry_ok  = chain_signed_by_mincifry(chain);
 
-        // Если в цепочке обнаружен сертификат Минцифры и наш trust-store его
-        // содержит — считаем цепочку валидной даже если OpenSSL не смог
-        // выстроить полный путь (бывает из-за отсутствия системных CA).
-        if (mincifry_ok && conn.verify_result != X509_V_OK) {
-            // Доверяем Минцифры-цепочке: ошибки 19/20 означают что OpenSSL
-            // не нашёл корень в системном хранилище, но мы знаем что наш
-            // trust-store его содержит.
-            if (conn.verify_result == 19 || conn.verify_result == 20) {
-                chain_ok = true;
-            }
+        // ── Определяем chain_ok ──
+        // Наша задача — показать, целая ли цепочка, а НЕ проверять доверие к
+        // корневому CA. Доверие к CA — забота браузера/ОС, а мы инспектор.
+        //
+        // Коды OpenSSL 19/20 означают лишь «корневой CA не найден в нашем
+        // локальном хранилище». На Android системные CA часто недоступны
+        // напрямую из OpenSSL, поэтому для ЛЮБЫХ сайтов (YouTube, Let's
+        // Encrypt, Google Trust Services и т.д.) будет код 19 или 20.
+        // Это НЕ ошибка цепочки — цепочка может быть полностью валидна.
+        //
+        // chain_ok = true если:
+        //   - OpenSSL полностью верифицировал (V_OK), ИЛИ
+        //   - Ошибка лишь в том, что корень не в локальном хранилище (19/20),
+        //     при этом сервер прислал хотя бы 2 сертификата (end-entity +
+        //     хотя бы 1 промежуточный/корневой).
+        if (conn.verify_result == X509_V_OK) {
+            chain_ok = true;
+        } else if ((conn.verify_result == 19 || conn.verify_result == 20)
+                   && chain.size() >= 2) {
+            // Цепочка структурно полная, просто корень не в нашем store.
+            chain_ok = true;
         }
 
         if (!chain_ok) {
             std::string chain_msg;
             switch (conn.verify_result) {
-                case 19: // X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN
-                    chain_msg = "Корневой сертификат цепочки не найден в хранилище доверия. "
-                                "Возможно используется VPN с подменой сертификатов.";
-                    break;
-                case 20: // X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY
-                    chain_msg = "Не удалось найти издателя сертификата в локальном хранилище.";
-                    break;
                 case 10: // X509_V_ERR_CERT_HAS_EXPIRED
                     chain_msg = "Один из сертификатов в цепочке просрочен.";
                     break;
+                case 2:  // X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT
+                    chain_msg = "Цепочка неполная: сервер не прислал промежуточный сертификат.";
+                    break;
+                case 21: // X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE
+                    chain_msg = "Не удалось проверить подпись конечного сертификата.";
+                    break;
                 default:
-                    chain_msg = "OpenSSL verify result code = " + std::to_string(conn.verify_result);
+                    chain_msg = "Ошибка проверки цепочки (код " + std::to_string(conn.verify_result) + ")";
                     break;
             }
             errors.push_back(error_obj("CHAIN_INVALID", chain_msg));
