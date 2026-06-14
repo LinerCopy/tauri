@@ -224,6 +224,7 @@ function mockUpdateCheck() {
         bundledFingerprint: bundledRoot,
         remoteFingerprint: bundledRoot,
         matchesBundled: true,
+        updated: false,
         error: null,
       },
       {
@@ -232,9 +233,11 @@ function mockUpdateCheck() {
         bundledFingerprint: bundledSub,
         remoteFingerprint: bundledSub,
         matchesBundled: true,
+        updated: false,
         error: null,
       },
     ],
     upToDate: true,
+    certsUpdated: 0,
   };
 }

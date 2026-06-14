@@ -25,6 +25,7 @@ interface UpdateCheckEntry {
   bundledFingerprint: string;
   remoteFingerprint: string | null;
   matchesBundled: boolean;
+  updated: boolean;
   error: string | null;
 }
 interface UpdateCheckResult {
@@ -32,6 +33,7 @@ interface UpdateCheckResult {
   bundledVersion: string;
   entries: UpdateCheckEntry[];
   upToDate: boolean;
+  certsUpdated: number;
 }
 
 const LS_LAST_CHECK = "gci.lastUpdateCheck";
@@ -168,13 +170,9 @@ async function copyAllFingerprints() {
 }
 
 /**
- * Реальная проверка обновлений: бэкенд скачивает официальные PEM
- * с сайта УЦ Минцифры и сравнивает SHA-256 с встроенным манифестом.
- *
- * По соображениям безопасности trust-store НЕ перезаписывается на лету
- * (это нарушило бы модель «trust-store подписан вместе с приложением»,
- * см. ТЗ §9). Если на сервере есть новая версия — пользователю
- * предлагается обновить приложение через App Store / Google Play.
+ * Реальная проверка и обновление сертификатов: бэкенд скачивает официальные PEM
+ * с сайта УЦ Минцифры, сравнивает SHA-256, и если сертификат отличается —
+ * автоматически обновляет локальную копию trust-store.
  */
 async function checkForUpdate() {
   if (checkingUpdate.value) return;
@@ -191,14 +189,14 @@ async function checkForUpdate() {
     const hasError = res.entries.some((e: UpdateCheckEntry) => e.error);
     if (hasError) {
       showToast("Не удалось проверить часть источников");
+    } else if (res.certsUpdated > 0) {
+      showToast(`Обновлено сертификатов: ${res.certsUpdated}`);
     } else if (res.upToDate) {
       showToast(
         "Сертификаты актуальны (версия " +
           (manifest.value?.version ?? res.bundledVersion ?? "—") +
           ")",
       );
-    } else {
-      showToast("Доступно обновление — обновите приложение");
     }
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
@@ -213,10 +211,13 @@ const updateBadge = computed(() => {
   if (lastCheck.value.entries.some((e: UpdateCheckEntry) => e.error)) {
     return { kind: "warn", text: "Не удалось проверить часть источников" };
   }
+  if (lastCheck.value.certsUpdated > 0) {
+    return { kind: "ok", text: `Обновлено: ${lastCheck.value.certsUpdated} серт.` };
+  }
   if (lastCheck.value.upToDate) {
     return { kind: "ok", text: "Сертификаты актуальны" };
   }
-  return { kind: "update", text: "Доступно обновление trust-store" };
+  return { kind: "ok", text: "Сертификаты актуальны" };
 });
 
 function showToast(msg: string) {
@@ -270,10 +271,9 @@ function showToast(msg: string) {
       <section class="card update-card">
         <h3 class="card-title">Обновление сертификатов Минцифры</h3>
         <p class="info-desc">
-          Корневые сертификаты УЦ Минцифры встроены в приложение на этапе сборки
-          и подписаны вместе с бинарём — это защищает их от подмены в канале
-          связи. Новые версии trust-store доставляются через App Store / Google
-          Play вместе с обновлением приложения.
+          Корневые сертификаты УЦ Минцифры встроены в приложение. При нажатии
+          «Проверить обновление» приложение скачивает актуальные сертификаты
+          с официального источника и автоматически обновляет локальное хранилище.
         </p>
 
         <div class="update-actions">
@@ -311,18 +311,19 @@ function showToast(msg: string) {
             v-for="entry in lastCheck.entries"
             :key="entry.name"
             :class="{
-              ok: entry.matchesBundled && !entry.error,
-              warn: !entry.matchesBundled && !entry.error,
+              ok: (entry.matchesBundled || entry.updated) && !entry.error,
+              warn: !entry.matchesBundled && !entry.updated && !entry.error,
               err: !!entry.error,
             }"
           >
             <span class="check-icon">
-              {{ entry.error ? "!" : entry.matchesBundled ? "✓" : "↑" }}
+              {{ entry.error ? "!" : entry.updated ? "↓" : entry.matchesBundled ? "✓" : "↑" }}
             </span>
             <span class="check-name">{{ entry.name }}</span>
             <span v-if="entry.error" class="check-msg">{{ entry.error }}</span>
+            <span v-else-if="entry.updated" class="check-msg">обновлён</span>
             <span v-else-if="entry.matchesBundled" class="check-msg">актуален</span>
-            <span v-else class="check-msg">доступна новая версия</span>
+            <span v-else class="check-msg">не удалось обновить</span>
           </li>
         </ul>
 

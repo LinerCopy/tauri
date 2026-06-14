@@ -52,6 +52,7 @@ function setupInvoke() {
             bundledFingerprint: mockManifest.roots[0].fingerprintSha256,
             remoteFingerprint: mockManifest.roots[0].fingerprintSha256,
             matchesBundled: true,
+            updated: false,
             error: null,
           },
           {
@@ -60,10 +61,12 @@ function setupInvoke() {
             bundledFingerprint: mockManifest.intermediates[0].fingerprintSha256,
             remoteFingerprint: mockManifest.intermediates[0].fingerprintSha256,
             matchesBundled: true,
+            updated: false,
             error: null,
           },
         ],
         upToDate: true,
+        certsUpdated: 0,
       };
     }
     throw new Error(`unexpected cmd ${cmd}`);

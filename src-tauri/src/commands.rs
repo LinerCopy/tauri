@@ -6,7 +6,9 @@ use crate::ffi;
 use base64::Engine as _;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::fs;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::Manager;
 
@@ -46,33 +48,87 @@ pub(crate) fn validate_url(url: &str) -> Result<(), CommandError> {
     Ok(())
 }
 
-/// Возвращает путь до каталога trust-store, поставляемого как resource.
-///
-/// На Android `BaseDirectory::Resource` возвращает asset URL вида
-/// `asset://localhost/trust-store`, а не файловый путь — `Path::exists()`
-/// вернёт false. Поэтому существование проверяем только на не-Android.
-///
-/// Используется только C++ ядром (default feature). Под `mock-core` /
-/// `rust-core` функция не вызывается, поэтому помечаем как allow(dead_code).
-#[cfg_attr(any(feature = "mock-core", feature = "rust-core"), allow(dead_code))]
-fn resolve_trust_store(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
-    let resource = app
-        .path()
-        .resolve("trust-store", tauri::path::BaseDirectory::Resource)
-        .map_err(|e| CommandError::TrustStore(e.to_string()))?;
+// ──────────────────────────────────────────────────────────────────────────────
+// Trust-store: встроенные в бинарь PEM-сертификаты + манифест.
+//
+// На Android/iOS Tauri-ресурсы доступны только как `asset://` URL,
+// а C++ и Rust-ядро ожидают обычный файловый путь. Поэтому при первом
+// запуске мы извлекаем embedded PEM в writable-каталог приложения
+// (app data dir), а позже можем обновить их OTA.
+// ──────────────────────────────────────────────────────────────────────────────
 
-    // On Android resources are bundled as APK assets — the path is a virtual
-    // asset:// URL and `exists()` always returns false. Skip the check there;
-    // the C++ core (OpenSSL) will get the path and open it via AAssetManager.
-    #[cfg(not(target_os = "android"))]
-    if !resource.exists() {
-        return Err(CommandError::TrustStore(format!(
-            "trust-store not found at {:?}",
-            resource
-        )));
+const TRUST_STORE_MANIFEST: &str =
+    include_str!("../../trust-store/manifest.json");
+
+const BUNDLED_ROOT_PEM: &[u8] =
+    include_bytes!("../../trust-store/roots/russian-trusted-root-ca.pem");
+
+const BUNDLED_SUB_PEM: &[u8] =
+    include_bytes!("../../trust-store/intermediates/russian-trusted-sub-ca.pem");
+
+/// Глобальный путь к writable trust-store каталогу, инициализируется один раз.
+static TRUST_STORE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Инициализирует trust-store на файловой системе: создаёт каталоги roots/
+/// и intermediates/, записывает в них встроенные PEM-файлы если они ещё
+/// отсутствуют на диске (первый запуск или wipe кэша).
+///
+/// Вызывается из `check_site` лениво при первом обращении.
+fn ensure_trust_store(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
+    if let Some(dir) = TRUST_STORE_DIR.get() {
+        return Ok(dir.clone());
     }
 
-    Ok(resource)
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| CommandError::TrustStore(format!("no app data dir: {}", e)))?;
+
+    let ts_dir = app_data.join("trust-store");
+    let roots_dir = ts_dir.join("roots");
+    let inter_dir = ts_dir.join("intermediates");
+
+    fs::create_dir_all(&roots_dir).map_err(|e| {
+        CommandError::TrustStore(format!("mkdir roots: {}", e))
+    })?;
+    fs::create_dir_all(&inter_dir).map_err(|e| {
+        CommandError::TrustStore(format!("mkdir intermediates: {}", e))
+    })?;
+
+    // Записываем встроенные PEM если файлов нет (первый запуск).
+    let root_path = roots_dir.join("russian-trusted-root-ca.pem");
+    let sub_path = inter_dir.join("russian-trusted-sub-ca.pem");
+
+    if !root_path.exists() {
+        fs::write(&root_path, BUNDLED_ROOT_PEM).map_err(|e| {
+            CommandError::TrustStore(format!("write root pem: {}", e))
+        })?;
+    }
+    if !sub_path.exists() {
+        fs::write(&sub_path, BUNDLED_SUB_PEM).map_err(|e| {
+            CommandError::TrustStore(format!("write sub pem: {}", e))
+        })?;
+    }
+
+    // Записываем manifest.json (для совместимости, хотя ядро его не читает).
+    let manifest_path = ts_dir.join("manifest.json");
+    if !manifest_path.exists() {
+        fs::write(&manifest_path, TRUST_STORE_MANIFEST.as_bytes()).map_err(|e| {
+            CommandError::TrustStore(format!("write manifest: {}", e))
+        })?;
+    }
+
+    let _ = TRUST_STORE_DIR.set(ts_dir.clone());
+    Ok(ts_dir)
+}
+
+/// Возвращает trust-store путь: writable каталог на Android/iOS,
+/// обычный resource-путь на desktop.
+#[cfg_attr(any(feature = "mock-core", feature = "rust-core"), allow(dead_code))]
+fn resolve_trust_store(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
+    // На мобильных платформах (и desktop для единообразия) используем
+    // writable app-data каталог с извлечёнными PEM.
+    ensure_trust_store(app)
 }
 
 #[tauri::command]
@@ -83,8 +139,6 @@ pub async fn check_site(
 ) -> Result<InspectResult, CommandError> {
     validate_url(&url)?;
 
-    // mock-core doesn't use the trust store at all — skip resolution to avoid
-    // false errors on Android where asset:// paths don't pass exists() checks.
     #[cfg(not(feature = "mock-core"))]
     let trust_store_str = {
         let trust_store = resolve_trust_store(&app)?;
@@ -92,13 +146,11 @@ pub async fn check_site(
     };
     #[cfg(feature = "mock-core")]
     let trust_store_str = String::new();
-    let _ = &app; // suppress unused warning in mock-core
+    let _ = &app;
 
     let request = InspectRequest::new(&url, &trust_store_str, load_html);
     let payload = serde_json::to_string(&request)?;
 
-    // TLS-handshake + парсинг — синхронная работа, уносим её в blocking-пул,
-    // чтобы не блокировать event-loop Tauri.
     let json_out = tauri::async_runtime::spawn_blocking(move || ffi::call_inspect_url(&payload))
         .await
         .map_err(|e| CommandError::Internal(format!("join: {e}")))??;
@@ -112,61 +164,53 @@ pub fn core_version() -> String {
     ffi::core_version()
 }
 
-/// Содержимое `trust-store/manifest.json`, встроенное в бинарь на этапе
-/// сборки. На Android и iOS Tauri-resources бывают доступны только как
-/// `asset://` URL и не открываются обычным `std::fs::read`, поэтому самым
-/// надёжным и кроссплатформенным решением является `include_str!`.
-///
-/// Обновление trust-store = пересборка приложения (что соответствует
-/// модели поставки УЦ Минцифры через App Store / Google Play, см. ТЗ §9).
-const TRUST_STORE_MANIFEST: &str =
-    include_str!("../../trust-store/manifest.json");
-
-/// Возвращает разобранный `trust-store/manifest.json`.
-/// Используется экраном настроек: отображает версию trust-store, источник
-/// и перечень корневых/промежуточных CA.
+/// Возвращает разобранный trust-store manifest.
+/// Если есть обновлённый manifest на диске — читает его.
+/// Иначе — встроенный.
 #[tauri::command]
-pub fn trust_store_info() -> Result<serde_json::Value, CommandError> {
+pub fn trust_store_info(app: tauri::AppHandle) -> Result<serde_json::Value, CommandError> {
+    // Попытка прочитать живой manifest с диска (OTA-обновлённый).
+    if let Ok(ts_dir) = ensure_trust_store(&app) {
+        let manifest_path = ts_dir.join("manifest.json");
+        if manifest_path.exists() {
+            if let Ok(content) = fs::read_to_string(&manifest_path) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                    return Ok(v);
+                }
+            }
+        }
+    }
+    // Fallback: встроенный манифест.
     let value: serde_json::Value = serde_json::from_str(TRUST_STORE_MANIFEST)?;
     Ok(value)
 }
 
 /// Сохраняет JSON-отчёт в папку Downloads.
-/// Возвращает полный путь к сохранённому файлу.
 #[tauri::command]
 pub async fn save_report(filename: String, content: String) -> Result<String, CommandError> {
     let download_dir = get_download_dir()?;
-
-    // Создаём каталог если его нет
-    std::fs::create_dir_all(&download_dir).map_err(|e| {
+    fs::create_dir_all(&download_dir).map_err(|e| {
         CommandError::Internal(format!("cannot create dir {:?}: {}", download_dir, e))
     })?;
-
     let file_path = download_dir.join(&filename);
-    std::fs::write(&file_path, content.as_bytes()).map_err(|e| {
+    fs::write(&file_path, content.as_bytes()).map_err(|e| {
         CommandError::Internal(format!("write failed: {}", e))
     })?;
-
     Ok(file_path.to_string_lossy().to_string())
 }
 
-/// Определяет каталог Downloads в зависимости от ОС.
 fn get_download_dir() -> Result<PathBuf, CommandError> {
-    // Android: /storage/emulated/0/Download
     #[cfg(target_os = "android")]
     {
         let path = PathBuf::from("/storage/emulated/0/Download");
         if path.exists() {
             return Ok(path);
         }
-        // Fallback: app-specific external storage
         if let Ok(ext) = std::env::var("EXTERNAL_STORAGE") {
             return Ok(PathBuf::from(ext).join("Download"));
         }
         return Ok(PathBuf::from("/sdcard/Download"));
     }
-
-    // Desktop: используем dirs crate
     #[cfg(not(target_os = "android"))]
     {
         dirs::download_dir()
@@ -174,29 +218,22 @@ fn get_download_dir() -> Result<PathBuf, CommandError> {
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// Реальная проверка обновлений trust-store (ТЗ §9).
+// ──────────────────────────────────────────────────────────────────────────────
+// OTA-обновление trust-store.
 //
-// По умолчанию trust-store встроен в бинарь и обновляется только через
-// App Store / Google Play. Эта команда выполняет «честную» онлайн-сверку:
-// скачивает официальные PEM с сайта УЦ Минцифры, считает SHA-256 от их
-// DER-представления и сравнивает с встроенным манифестом.
-//
-// Если фингерпринты совпадают → пользователь видит «актуально».
-// Если различаются → видит «доступна новая версия — обновите приложение».
-// OTA-замена сертификатов не выполняется намеренно, чтобы сохранить
-// модель «trust-store подписан вместе с приложением».
-// ──────────────────────────────────────────────────────────────────────────
+// При нажатии «Проверить обновление» бэкенд скачивает официальные PEM-файлы
+// с сайта УЦ Минцифры, проверяет что они содержат валидный CERTIFICATE-блок,
+// считает SHA-256 и, если фингерпринт отличается от текущего на диске,
+// ПЕРЕЗАПИСЫВАЕТ локальные PEM (в writable app data) и обновляет manifest.json.
+// Таким образом следующий вызов check_site уже будет использовать новые серты.
+// ──────────────────────────────────────────────────────────────────────────────
 
-/// Описание одного источника, который мы проверяем онлайн.
 struct UpdateSource {
-    /// Логическое имя, отображается во фронте (`root`, `sub`).
     name: &'static str,
-    /// Подкаталог встроенного манифеста: `roots` / `intermediates`.
     bundle_key: &'static str,
-    /// Имя PEM-файла, по которому ищем встроенный fingerprint.
     bundle_file: &'static str,
-    /// Официальный URL с PEM на сайте УЦ Минцифры России.
+    /// Относительный путь PEM внутри trust-store каталога (для записи).
+    rel_path: &'static str,
     url: &'static str,
 }
 
@@ -205,12 +242,14 @@ const UPDATE_SOURCES: &[UpdateSource] = &[
         name: "root",
         bundle_key: "roots",
         bundle_file: "roots/russian-trusted-root-ca.pem",
+        rel_path: "roots/russian-trusted-root-ca.pem",
         url: "https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt",
     },
     UpdateSource {
         name: "sub",
         bundle_key: "intermediates",
         bundle_file: "intermediates/russian-trusted-sub-ca.pem",
+        rel_path: "intermediates/russian-trusted-sub-ca.pem",
         url: "https://gu-st.ru/content/lending/russian_trusted_sub_ca_pem.crt",
     },
 ];
@@ -223,6 +262,7 @@ struct UpdateCheckEntry {
     bundled_fingerprint: String,
     remote_fingerprint: Option<String>,
     matches_bundled: bool,
+    updated: bool,
     error: Option<String>,
 }
 
@@ -233,9 +273,10 @@ pub struct UpdateCheckResult {
     bundled_version: String,
     entries: Vec<UpdateCheckEntry>,
     up_to_date: bool,
+    /// Сколько сертификатов было реально обновлено на диске.
+    certs_updated: u32,
 }
 
-/// Парсит PEM-строку, возвращает первый DER-блок CERTIFICATE.
 fn pem_to_der(pem: &str) -> Result<Vec<u8>, String> {
     let mut in_cert = false;
     let mut b64 = String::new();
@@ -260,7 +301,6 @@ fn pem_to_der(pem: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("base64 decode: {}", e))
 }
 
-/// Форматирует bytes как `AA:BB:CC:...` (так же, как в manifest.json).
 fn fmt_fingerprint(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 3);
     for (i, b) in bytes.iter().enumerate() {
@@ -272,7 +312,6 @@ fn fmt_fingerprint(bytes: &[u8]) -> String {
     out
 }
 
-/// Достаёт fingerprint из встроенного манифеста по `file`.
 fn bundled_fingerprint(manifest: &serde_json::Value, key: &str, file: &str) -> Option<String> {
     let arr = manifest.get(key)?.as_array()?;
     for item in arr {
@@ -286,8 +325,11 @@ fn bundled_fingerprint(manifest: &serde_json::Value, key: &str, file: &str) -> O
     None
 }
 
-/// Скачивает PEM по URL и возвращает SHA-256 от DER-представления сертификата.
-async fn fetch_remote_fingerprint(client: &reqwest::Client, url: &str) -> Result<String, String> {
+/// Скачивает PEM по URL. Возвращает (текст PEM, SHA-256 fingerprint DER).
+async fn fetch_remote_pem(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<(String, String), String> {
     let resp = client
         .get(url)
         .send()
@@ -302,11 +344,24 @@ async fn fetch_remote_fingerprint(client: &reqwest::Client, url: &str) -> Result
         .map_err(|e| format!("read body: {}", e))?;
     let der = pem_to_der(&body)?;
     let digest = Sha256::digest(&der);
-    Ok(fmt_fingerprint(&digest))
+    Ok((body, fmt_fingerprint(&digest)))
+}
+
+/// Читает текущий локальный PEM (с диска) и вычисляет его fingerprint.
+fn local_fingerprint(ts_dir: &PathBuf, rel_path: &str) -> Option<String> {
+    let path = ts_dir.join(rel_path);
+    let pem = fs::read_to_string(&path).ok()?;
+    let der = pem_to_der(&pem).ok()?;
+    let digest = Sha256::digest(&der);
+    Some(fmt_fingerprint(&digest))
 }
 
 #[tauri::command]
-pub async fn check_trust_store_updates() -> Result<UpdateCheckResult, CommandError> {
+pub async fn check_trust_store_updates(
+    app: tauri::AppHandle,
+) -> Result<UpdateCheckResult, CommandError> {
+    let ts_dir = ensure_trust_store(&app)?;
+
     let manifest: serde_json::Value = serde_json::from_str(TRUST_STORE_MANIFEST)?;
     let bundled_version = manifest
         .get("version")
@@ -323,64 +378,145 @@ pub async fn check_trust_store_updates() -> Result<UpdateCheckResult, CommandErr
 
     let mut entries = Vec::with_capacity(UPDATE_SOURCES.len());
     let mut all_match = true;
+    let mut certs_updated: u32 = 0;
 
     for src in UPDATE_SOURCES {
-        let bundled_fp =
-            bundled_fingerprint(&manifest, src.bundle_key, src.bundle_file).unwrap_or_default();
+        // Сначала определяем текущий fingerprint — он может быть уже
+        // OTA-обновлённым (отличается от bundled).
+        let current_fp = local_fingerprint(&ts_dir, src.rel_path)
+            .or_else(|| bundled_fingerprint(&manifest, src.bundle_key, src.bundle_file))
+            .unwrap_or_default();
 
-        match fetch_remote_fingerprint(&client, src.url).await {
-            Ok(remote_fp) => {
-                let matches = remote_fp.eq_ignore_ascii_case(&bundled_fp);
+        match fetch_remote_pem(&client, src.url).await {
+            Ok((pem_text, remote_fp)) => {
+                let matches = remote_fp.eq_ignore_ascii_case(&current_fp);
+                let mut updated = false;
+
                 if !matches {
-                    all_match = false;
+                    // Новый сертификат — записываем на диск!
+                    let dest = ts_dir.join(src.rel_path);
+                    if let Some(parent) = dest.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    match fs::write(&dest, pem_text.as_bytes()) {
+                        Ok(_) => {
+                            updated = true;
+                            certs_updated += 1;
+                        }
+                        Err(e) => {
+                            entries.push(UpdateCheckEntry {
+                                name: src.name.to_string(),
+                                url: src.url.to_string(),
+                                bundled_fingerprint: current_fp,
+                                remote_fingerprint: Some(remote_fp),
+                                matches_bundled: false,
+                                updated: false,
+                                error: Some(format!("write failed: {}", e)),
+                            });
+                            all_match = false;
+                            continue;
+                        }
+                    }
                 }
+
                 entries.push(UpdateCheckEntry {
                     name: src.name.to_string(),
                     url: src.url.to_string(),
-                    bundled_fingerprint: bundled_fp,
+                    bundled_fingerprint: current_fp,
                     remote_fingerprint: Some(remote_fp),
                     matches_bundled: matches,
+                    updated,
                     error: None,
                 });
+                if !matches && !updated {
+                    all_match = false;
+                }
             }
             Err(err) => {
                 all_match = false;
                 entries.push(UpdateCheckEntry {
                     name: src.name.to_string(),
                     url: src.url.to_string(),
-                    bundled_fingerprint: bundled_fp,
+                    bundled_fingerprint: current_fp,
                     remote_fingerprint: None,
                     matches_bundled: false,
+                    updated: false,
                     error: Some(err),
                 });
             }
         }
     }
 
+    // Если были реальные обновления — обновим и manifest.json на диске,
+    // чтобы trust_store_info возвращал свежие fingerprint.
+    if certs_updated > 0 {
+        update_local_manifest(&ts_dir);
+    }
+
     Ok(UpdateCheckResult {
         checked_at: current_iso8601(),
         bundled_version,
         entries,
-        up_to_date: all_match,
+        up_to_date: all_match || certs_updated > 0,
+        certs_updated,
     })
 }
 
-/// Минимальный ISO-8601 без зависимости от `chrono` (которое у нас под фичей).
+/// Перегенерирует `manifest.json` на диске из реально лежащих PEM.
+fn update_local_manifest(ts_dir: &PathBuf) {
+    // Читаем исходный шаблон
+    let mut manifest: serde_json::Value = match serde_json::from_str(TRUST_STORE_MANIFEST) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    // Обновляем updatedAt
+    if let Some(obj) = manifest.as_object_mut() {
+        obj.insert("updatedAt".to_string(), serde_json::json!(current_iso8601()));
+    }
+
+    // Обновляем fingerprint для каждого PEM, если файл есть на диске
+    for src in UPDATE_SOURCES {
+        let pem_path = ts_dir.join(src.rel_path);
+        if let Ok(pem) = fs::read_to_string(&pem_path) {
+            if let Ok(der) = pem_to_der(&pem) {
+                let fp = fmt_fingerprint(&Sha256::digest(&der));
+                // Найдём и обновим запись в manifest
+                if let Some(arr) = manifest.get_mut(src.bundle_key).and_then(|v| v.as_array_mut())
+                {
+                    for item in arr.iter_mut() {
+                        if item.get("file").and_then(|f| f.as_str()) == Some(src.bundle_file) {
+                            if let Some(obj) = item.as_object_mut() {
+                                obj.insert(
+                                    "fingerprintSha256".to_string(),
+                                    serde_json::json!(fp),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Записываем обновлённый manifest
+    if let Ok(json) = serde_json::to_string_pretty(&manifest) {
+        let _ = fs::write(ts_dir.join("manifest.json"), json.as_bytes());
+    }
+}
+
 fn current_iso8601() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // Быстрый перевод UNIX-секунд в UTC YYYY-MM-DDTHH:MM:SSZ (алгоритм
-    // Howard Hinnant'a, без внешних зависимостей).
     let days = (secs / 86_400) as i64;
     let secs_of_day = (secs % 86_400) as u32;
     let h = secs_of_day / 3600;
     let m = (secs_of_day % 3600) / 60;
     let s = secs_of_day % 60;
 
-    // 1970-01-01 == day 0 в shifted-эпохе Hinnant'a (era 0 starts at 0000-03-01)
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = (z - era * 146_097) as u64;
@@ -438,9 +574,17 @@ mod tests {
     }
 
     #[test]
-    fn trust_store_info_returns_manifest() {
-        let v = trust_store_info().expect("trust_store_info should succeed");
-        assert!(v.get("issuer").is_some());
+    fn embedded_root_pem_is_valid() {
+        let pem = std::str::from_utf8(BUNDLED_ROOT_PEM).expect("root PEM must be UTF-8");
+        let der = pem_to_der(pem).expect("root PEM must parse");
+        assert!(der.len() > 100, "root DER too short: {} bytes", der.len());
+    }
+
+    #[test]
+    fn embedded_sub_pem_is_valid() {
+        let pem = std::str::from_utf8(BUNDLED_SUB_PEM).expect("sub PEM must be UTF-8");
+        let der = pem_to_der(pem).expect("sub PEM must parse");
+        assert!(der.len() > 100, "sub DER too short: {} bytes", der.len());
     }
 
     #[test]
