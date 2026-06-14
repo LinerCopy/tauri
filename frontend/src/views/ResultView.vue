@@ -9,6 +9,7 @@ const data = ref<InspectResult | null>(null);
 const toastMsg = ref("");
 const showHtml = ref(false);
 const showJson = ref(false);
+const expandedChain = ref<Set<number>>(new Set());
 
 onMounted(() => {
   const stored = localStorage.getItem("lastResult");
@@ -131,6 +132,31 @@ function showToast(msg: string) {
     toastMsg.value = "";
   }, 3000);
 }
+
+function toggleChain(idx: number) {
+  const s = new Set(expandedChain.value);
+  if (s.has(idx)) s.delete(idx);
+  else s.add(idx);
+  expandedChain.value = s;
+}
+
+async function copyText(text: string | undefined) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast("Скопировано!");
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+    showToast("Скопировано!");
+  }
+}
 </script>
 
 <template>
@@ -166,7 +192,7 @@ function showToast(msg: string) {
     </header>
 
     <main class="result-content">
-      <section class="card tls-card">
+      <section class="card tls-card" v-if="data.tlsVersion || data.tlsCipher">
         <div class="tls-badge">
           <span class="tls-version">{{ data.tlsVersion }}</span>
           <span class="tls-cipher">{{ formatCipher(data.tlsCipher) }}</span>
@@ -260,10 +286,35 @@ function showToast(msg: string) {
         <h3 class="card-title">Цепочка ({{ data.chain.length }})</h3>
         <div class="chain-list">
           <div class="chain-item" v-for="(cert, i) in data.chain" :key="i">
-            <div class="chain-index">{{ i }}</div>
-            <div class="chain-info">
-              <div class="chain-subject">{{ cert.subject }}</div>
-              <div class="chain-issuer">← {{ cert.issuer }}</div>
+            <button
+              class="chain-header"
+              type="button"
+              @click="toggleChain(i)"
+            >
+              <div class="chain-index">{{ i }}</div>
+              <div class="chain-info">
+                <div class="chain-subject">{{ cert.subject }}</div>
+                <div class="chain-issuer">← {{ cert.issuer }}</div>
+              </div>
+              <span class="chain-chevron" :class="{ open: expandedChain.has(i) }">▾</span>
+            </button>
+            <div v-if="expandedChain.has(i)" class="chain-details">
+              <div class="chain-detail-row">
+                <span class="chain-detail-label">Valid From</span>
+                <span class="chain-detail-value">{{ formatDate(cert.validFrom) }}</span>
+              </div>
+              <div class="chain-detail-row">
+                <span class="chain-detail-label">Valid To</span>
+                <span class="chain-detail-value">{{ formatDate(cert.validTo) }}</span>
+              </div>
+              <div class="chain-detail-row">
+                <span class="chain-detail-label">Serial</span>
+                <span class="chain-detail-value mono clickable" @click="copyText(cert.serialNumber)">{{ cert.serialNumber }}</span>
+              </div>
+              <div class="chain-detail-row">
+                <span class="chain-detail-label">SHA-256</span>
+                <span class="chain-detail-value mono clickable" @click="copyText(cert.fingerprintSha256)">{{ cert.fingerprintSha256 }}</span>
+              </div>
             </div>
           </div>
         </div>
@@ -331,7 +382,11 @@ function showToast(msg: string) {
 <style scoped>
 .result-view {
   min-height: 100vh;
+  min-height: 100dvh;
   background: #f5f7fa;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
 }
 
 .result-header {
@@ -391,7 +446,7 @@ function showToast(msg: string) {
 }
 
 .result-content {
-  padding: calc(env(safe-area-inset-top, 12px) + 72px) 16px 32px;
+  padding: calc(env(safe-area-inset-top, 12px) + 64px) 16px calc(env(safe-area-inset-bottom, 16px) + 32px);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -465,7 +520,8 @@ function showToast(msg: string) {
   font-size: 12px;
   color: #6b7280;
   margin: 4px 0 0;
-  word-break: break-all;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
 }
 
 .checks-list {
@@ -514,7 +570,10 @@ li:not(.ok) .check-icon {
   font-size: 13px;
   color: #991b1b;
   margin-bottom: 4px;
-  word-break: break-all;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  hyphens: auto;
+  -webkit-hyphens: auto;
 }
 
 .cert-details {
@@ -553,13 +612,26 @@ li:not(.ok) .check-icon {
   flex-direction: column;
 }
 .chain-item {
-  display: flex;
-  gap: 10px;
-  padding: 10px 0;
   border-bottom: 1px solid #f3f4f6;
 }
 .chain-item:last-child {
   border-bottom: none;
+}
+.chain-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  width: 100%;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  font: inherit;
+}
+.chain-header:active {
+  opacity: 0.7;
 }
 .chain-index {
   width: 22px;
@@ -582,13 +654,61 @@ li:not(.ok) .check-icon {
   font-size: 13px;
   font-weight: 500;
   color: #1f2937;
-  word-break: break-all;
+  overflow-wrap: break-word;
 }
 .chain-issuer {
   font-size: 11px;
   color: #9ca3af;
-  word-break: break-all;
+  overflow-wrap: break-word;
   margin-top: 2px;
+}
+.chain-chevron {
+  font-size: 14px;
+  color: #9ca3af;
+  transition: transform 0.18s ease;
+  flex-shrink: 0;
+}
+.chain-chevron.open {
+  transform: rotate(180deg);
+  color: #374151;
+}
+.chain-details {
+  padding: 0 0 10px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.chain-detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.chain-detail-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #9ca3af;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.chain-detail-value {
+  font-size: 12px;
+  color: #374151;
+  overflow-wrap: break-word;
+}
+.chain-detail-value.mono {
+  font-family: monospace;
+  font-size: 11px;
+  color: #6b7280;
+}
+.chain-detail-value.clickable {
+  cursor: pointer;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border-radius: 4px;
+  transition: background 0.1s;
+}
+.chain-detail-value.clickable:active {
+  background: #e5e7eb;
 }
 
 .actions {

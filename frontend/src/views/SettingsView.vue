@@ -461,8 +461,8 @@ function showToast(msg: string) {
 }
 
 .settings-content {
-  padding: calc(env(safe-area-inset-top, 12px) + 72px) 16px
-    env(safe-area-inset-bottom, 32px);
+  padding: calc(env(safe-area-inset-top, 12px) + 64px) 16px
+    calc(env(safe-area-inset-bottom, 16px) + 32px);
   display: flex;
   flex-direction: column;
   gap: 12px;

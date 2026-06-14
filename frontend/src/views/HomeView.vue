@@ -68,13 +68,14 @@ function openSettings() {
 
 <style scoped>
 .home {
-  padding: 20px 16px;
+  padding: 20px 16px calc(env(safe-area-inset-bottom, 16px) + 20px);
   display: flex;
   flex-direction: column;
   gap: 16px;
   max-width: 720px;
   margin: 0 auto;
   min-height: 100vh;
+  min-height: 100dvh;
 }
 .home-header {
   display: flex;
