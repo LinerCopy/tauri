@@ -13,17 +13,9 @@ on:
   pull_request:
   workflow_dispatch:
 
-# ────────────────────────────────────────────────────────────────────────────
-# Сборка по ТЗ §10: C++17 ядро + статический OpenSSL 3.x + GOST engine +
-# CMake + NDK r26+. OpenSSL-build агрессивно кешируется.
-# ────────────────────────────────────────────────────────────────────────────
-
 jobs:
-  # ─────────────────────────────────────────────────────────────────────────
-  # TZ-compliant сборка (C++ + OpenSSL static + GOST + CMake + NDK r26+)
-  # ─────────────────────────────────────────────────────────────────────────
   android-cpp:
-    name: APK (C++ core, OpenSSL static, TZ §10)
+    name: APK (C++ core, OpenSSL static)
     runs-on: ubuntu-22.04
     env:
       ANDROID_NDK_VERSION: "26.2.11394342"
@@ -79,9 +71,7 @@ jobs:
           npm test
           npm run build
 
-      # ── Кешируем уже собранный OpenSSL (libssl.a/libcrypto.a + headers) ──
-      # Ключ зависит только от версии OpenSSL и NDK — при их смене кеш
-      # инвалидируется автоматически.
+      # Кешируем уже собранный OpenSSL (libssl.a/libcrypto.a + headers) ──
       - name: Cache OpenSSL static (Android)
         id: openssl-cache
         uses: actions/cache@v4
@@ -106,7 +96,7 @@ jobs:
           echo "OpenSSL OK:"
           ls -l "$PREFIX/lib"
 
-      # ── GOST engine для поддержки ГОСТ-шифрования (rosreestr.gov.ru и др.) ──
+      # GOST engine для поддержки ГОСТ-шифрования
       - name: Cache GOST engine (Android)
         id: gost-cache
         uses: actions/cache@v4
@@ -123,7 +113,6 @@ jobs:
           bash scripts/build-gost-engine-android.sh arm64 || {
             echo "::warning::GOST engine build failed - APK will be built without ГОСТ TLS support"
             echo "rosreestr.gov.ru and similar GOST-only sites won't be accessible"
-            # Make a marker so the build.rs knows GOST is not available
             mkdir -p third_party/gost-engine/install/android-arm64/lib
             touch third_party/gost-engine/install/android-arm64/.build-failed
             exit 0
@@ -159,9 +148,6 @@ jobs:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
         run: cargo tauri android init --ci
 
-      # ── Финальная сборка APK по ТЗ §4 / §10:
-      #    C++ ядро (default-фича, без rust-core), OpenSSL — static,
-      #    CMake поднимает gci_core_static и линкует его в libapp.so.
       - name: Build Android APK (debug, C++ core + OpenSSL static)
         working-directory: src-tauri
         env:
@@ -172,7 +158,7 @@ jobs:
           OPENSSL_INCLUDE_DIR: ${{ github.workspace }}/third_party/openssl/install/android-arm64/include
           GOST_ENGINE_ROOT: ${{ github.workspace }}/third_party/gost-engine/install/android-arm64
         run: >
-          cargo tauri android build --debug --apk --target aarch64
+          cargo tauri android build --apk --target aarch64
           --config '{"build":{"beforeBuildCommand":"","beforeDevCommand":""}}'
 
       - name: Upload APK (C++ core)

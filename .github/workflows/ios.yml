@@ -14,7 +14,7 @@ on:
 
 jobs:
   build-ios:
-    name: iOS .app (C++ core, OpenSSL XCFramework, TZ §10)
+    name: iOS .app (C++ core, OpenSSL XCFramework)
     runs-on: macos-15
     env:
       OPENSSL_VERSION: "openssl-3.4.1"
@@ -58,8 +58,8 @@ jobs:
       - name: Install CMake + Ninja
         run: brew install cmake ninja
 
-      # ── Кешируем три install-каталога OpenSSL (device + sim arm64 + sim x86_64),
-      #    а также готовый OpenSSL.xcframework. Ключ зависит от версии и Xcode-major.
+      # Кешируем три install-каталога OpenSSL (device + sim arm64 + sim x86_64),
+      # а также готовый OpenSSL.xcframework.
       - name: Cache OpenSSL build
         id: openssl-cache
         uses: actions/cache@v4
@@ -74,20 +74,20 @@ jobs:
           mkdir -p third_party && cd third_party
           git clone --depth 1 --branch ${OPENSSL_VERSION} https://github.com/openssl/openssl.git
           cd openssl
-          # ── device arm64 ───────────────────────────────────────────────────
+
           make distclean >/dev/null 2>&1 || true
           ./Configure ios64-xcrun no-shared no-tests no-asm \
             --prefix=$PWD/../openssl/install/ios-arm64 \
             --openssldir=$PWD/../openssl/install/ios-arm64/ssl
           make -j"$(sysctl -n hw.ncpu)" build_libs && make install_dev
-          # ── simulator arm64 (Apple Silicon Mac) ────────────────────────────
+
           make distclean
           ./Configure iossimulator-xcrun no-shared no-tests no-asm \
             --prefix=$PWD/../openssl/install/ios-simulator-arm64 \
             --openssldir=$PWD/../openssl/install/ios-simulator-arm64/ssl \
             CFLAGS="-arch arm64"
           make -j"$(sysctl -n hw.ncpu)" build_libs && make install_dev
-          # ── simulator x86_64 (Intel Mac / Xcode CI iPhone Simulator) ───────
+
           make distclean
           ./Configure iossimulator-xcrun no-shared no-tests no-asm \
             --prefix=$PWD/../openssl/install/ios-simulator-x86_64 \
@@ -95,13 +95,12 @@ jobs:
             CFLAGS="-arch x86_64"
           make -j"$(sysctl -n hw.ncpu)" build_libs && make install_dev
 
-      - name: Assemble OpenSSL.xcframework (TZ §10)
+      - name: Assemble OpenSSL.xcframework
         run: |
           set -euo pipefail
           ROOT="${GITHUB_WORKSPACE}/third_party/openssl/install"
-          # Удаляем предыдущие xcframeworks (из кеша) чтобы xcodebuild не падал
           rm -rf "${ROOT}"/*.xcframework
-          # Сначала ssl, затем crypto — отдельные xcframework на библиотеку.
+
           for lib in ssl crypto; do
             xcodebuild -create-xcframework \
               -library "${ROOT}/ios-arm64/lib/lib${lib}.a"           -headers "${ROOT}/ios-arm64/include" \
@@ -125,24 +124,10 @@ jobs:
       - name: Disable code signing for CI
         run: |
           PROJ="src-tauri/gen/apple/gci-app.xcodeproj/project.pbxproj"
-          # Ad-hoc signing (no provisioning profile required)
           sed -i '' 's/CODE_SIGN_IDENTITY = "[^"]*"/CODE_SIGN_IDENTITY = "-"/g' "$PROJ"
-          # Remove any development team requirement
           sed -i '' 's/DEVELOPMENT_TEAM = [^;]*/DEVELOPMENT_TEAM = ""/g' "$PROJ"
-          # Inject CODE_SIGNING_REQUIRED = NO and CODE_SIGNING_ALLOWED = NO
           perl -i -pe 's/(buildSettings = \{)/$1\n\t\t\t\tCODE_SIGNING_REQUIRED = NO;\n\t\t\t\tCODE_SIGNING_ALLOWED = NO;/g' "$PROJ"
 
-      # ── Финальная сборка по ТЗ §4 / §10: C++ ядро + OpenSSL static.
-      #    rust-core фича НЕ включается (это обходной путь, не из ТЗ).
-      #    beforeBuildCommand отключается: frontend уже собран на предыдущем шаге.
-      #
-      #    Без Apple Developer-аккаунта `xcodebuild -exportArchive` падает
-      #    с «No Team Found in Archive» — это нормально для open-source CI.
-      #    Поэтому шаг помечен continue-on-error: следующий шаг достанет
-      #    готовый .app прямо из .xcarchive (он собирается ДО экспорта).
-      #    Полная пошаговая инструкция, как подключить Apple-аккаунт
-      #    (бесплатный личный или $99/year Developer Program) и получить
-      #    подписанный .ipa — см. docs/ios-signing.md.
       - name: Build iOS (device, debug, C++ core + OpenSSL static)
         id: ios-build
         continue-on-error: true
@@ -155,9 +140,6 @@ jobs:
           cargo tauri ios build --debug --target aarch64
           --config '{"build":{"beforeBuildCommand":"","beforeDevCommand":""}}'
 
-      # exportArchive падает без team-id, но сам .app собирается успешно
-      # и лежит внутри .xcarchive — копируем его в gen/apple/build/Artifacts/
-      # для последующего upload-artifact.
       - name: Extract .app from .xcarchive (fallback without signing)
         run: |
           set -euo pipefail
@@ -180,8 +162,6 @@ jobs:
           ls -la "$DEST" || true
           find "$DEST" -maxdepth 3 -type d | head -50
 
-          # Fail the job ONLY if no .app was produced anywhere — that's a
-          # real build error, not a signing/export issue we tolerate above.
           if [ -z "$(find src-tauri/gen/apple -type d -name '*.app' 2>/dev/null | head -1)" ]; then
             echo "::error::No .app produced; iOS build genuinely failed"
             exit 1
