@@ -216,60 +216,88 @@ const char* inspect_url(const char* request_json) {
 
     gci::TlsClient client(trust_store_path, timeout_ms);
     gci::TlsConnection conn;
-    if (!client.connect(parsed, conn, err)) {
-        // ── Распознаём типичные ошибки и даём понятное сообщение ──
-        std::string user_msg = err;
-        std::string code = "TLS_HANDSHAKE";
+    bool used_gost_connection = false;
 
-        // VPN / прокси обрывает соединение
-        if (err.find("unexpected eof") != std::string::npos ||
-            err.find("connection reset") != std::string::npos ||
-            err.find("broken pipe") != std::string::npos) {
-            code = "CONNECTION_RESET";
-            user_msg = "Соединение прервано удалённой стороной. "
-                       "Если используется VPN или прокси — попробуйте отключить их и повторить.";
-        }
-        // Таймаут / сеть недоступна
-        else if (err.find("timed out") != std::string::npos ||
-                 err.find("timeout") != std::string::npos) {
-            code = "TIMEOUT";
-            user_msg = "Время ожидания подключения истекло. Проверьте интернет-соединение.";
-        }
-        // DNS
-        else if (err.find("resolve") != std::string::npos ||
-                 err.find("getaddrinfo") != std::string::npos ||
-                 err.find("Name or service not known") != std::string::npos) {
-            code = "DNS_FAILED";
-            user_msg = "Не удалось разрешить доменное имя. Проверьте интернет-соединение.";
-        }
-        // Сервер отказал / TCP refused
-        else if (err.find("Connection refused") != std::string::npos ||
-                 err.find("connect failed") != std::string::npos) {
-            code = "CONNECTION_REFUSED";
-            user_msg = "Сервер отклонил подключение на порту 443.";
-        }
-        // ГОСТ TLS — нет общих шифров
-        else if (err.find("no shared cipher") != std::string::npos ||
-                 err.find("no ciphers available") != std::string::npos ||
-                 err.find("no protocols available") != std::string::npos ||
-                 err.find("sslv3 alert handshake failure") != std::string::npos ||
-                 err.find("handshake failure") != std::string::npos) {
+    // ── Стратегия двойного подключения ──
+    // 1. Пробуем подключиться только по ГОСТ-шифрам
+    // 2. Если соединение прошло И сертификат подписан Минцифры — используем его
+    // 3. Иначе — подключаемся стандартным набором шифров
 #ifdef GCI_GOST_ENABLED
-            code = "TLS_CIPHER_MISMATCH";
-            user_msg = "Не удалось согласовать шифр с сервером. "
-                       "ГОСТ-поддержка активна, но сервер может требовать "
-                       "дополнительную конфигурацию (например, клиентский сертификат).";
-#else
-            code = "GOST_UNSUPPORTED";
-            user_msg = "Сайт использует только ГОСТ-шифрование (российский стандарт). "
-                       "В текущей сборке поддержка ГОСТ отсутствует — "
-                       "сертификат этого сайта нельзя проверить.";
-#endif
+    {
+        gci::TlsConnection gost_conn;
+        std::string gost_err;
+        if (client.connect_gost_only(parsed, gost_conn, gost_err)) {
+            // ГОСТ-соединение установлено — проверяем сертификат Минцифры
+            SSL* gost_ssl = gost_conn.ssl();
+            if (gost_ssl) {
+                auto gost_chain = gci::X509Parser::chain_from_ssl(gost_ssl);
+                if (chain_signed_by_mincifry(gost_chain)) {
+                    // Нашли сертификат Минцифры — используем ГОСТ-соединение
+                    conn = std::move(gost_conn);
+                    used_gost_connection = true;
+                }
+            }
         }
+        // Если ГОСТ не прошёл или Минцифры не найден — идём ниже к стандартному
+    }
+#endif
 
-        json out = json::parse(build_error_response(request_id, input_url, code, user_msg));
-        out["resolvedHost"] = parsed.host;
-        return dup_to_c(out.dump());
+    if (!used_gost_connection) {
+        if (!client.connect(parsed, conn, err)) {
+            // ── Распознаём типичные ошибки и даём понятное сообщение ──
+            std::string user_msg = err;
+            std::string code = "TLS_HANDSHAKE";
+
+            // VPN / прокси обрывает соединение
+            if (err.find("unexpected eof") != std::string::npos ||
+                err.find("connection reset") != std::string::npos ||
+                err.find("broken pipe") != std::string::npos) {
+                code = "CONNECTION_RESET";
+                user_msg = "Соединение прервано удалённой стороной. "
+                           "Если используется VPN или прокси — попробуйте отключить их и повторить.";
+            }
+            // Таймаут / сеть недоступна
+            else if (err.find("timed out") != std::string::npos ||
+                     err.find("timeout") != std::string::npos) {
+                code = "TIMEOUT";
+                user_msg = "Время ожидания подключения истекло. Проверьте интернет-соединение.";
+            }
+            // DNS
+            else if (err.find("resolve") != std::string::npos ||
+                     err.find("getaddrinfo") != std::string::npos ||
+                     err.find("Name or service not known") != std::string::npos) {
+                code = "DNS_FAILED";
+                user_msg = "Не удалось разрешить доменное имя. Проверьте интернет-соединение.";
+            }
+            // Сервер отказал / TCP refused
+            else if (err.find("Connection refused") != std::string::npos ||
+                     err.find("connect failed") != std::string::npos) {
+                code = "CONNECTION_REFUSED";
+                user_msg = "Сервер отклонил подключение на порту 443.";
+            }
+            // ГОСТ TLS — нет общих шифров
+            else if (err.find("no shared cipher") != std::string::npos ||
+                     err.find("no ciphers available") != std::string::npos ||
+                     err.find("no protocols available") != std::string::npos ||
+                     err.find("sslv3 alert handshake failure") != std::string::npos ||
+                     err.find("handshake failure") != std::string::npos) {
+#ifdef GCI_GOST_ENABLED
+                code = "TLS_CIPHER_MISMATCH";
+                user_msg = "Не удалось согласовать шифр с сервером. "
+                           "ГОСТ-поддержка активна, но сервер может требовать "
+                           "дополнительную конфигурацию (например, клиентский сертификат).";
+#else
+                code = "GOST_UNSUPPORTED";
+                user_msg = "Сайт использует только ГОСТ-шифрование (российский стандарт). "
+                           "В текущей сборке поддержка ГОСТ отсутствует — "
+                           "сертификат этого сайта нельзя проверить.";
+#endif
+            }
+
+            json out = json::parse(build_error_response(request_id, input_url, code, user_msg));
+            out["resolvedHost"] = parsed.host;
+            return dup_to_c(out.dump());
+        }
     }
 
     // SSL принадлежит BIO. Получаем сырой указатель через accessor.

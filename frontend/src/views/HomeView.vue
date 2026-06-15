@@ -5,7 +5,7 @@ import SiteSelector from "@/components/SiteSelector.vue";
 import { useCheckSite } from "@/composables/useCheckSite";
 import { isDemoMode } from "@/lib/invokeBackend";
 
-const url = ref("https://gosuslugi.ru");
+const url = ref("");
 const loadHtml = ref(true);
 const router = useRouter();
 const { loading, error, checkSite } = useCheckSite();

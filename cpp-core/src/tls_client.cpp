@@ -300,4 +300,84 @@ SSL* TlsConnection::ssl() const noexcept {
     return s;
 }
 
+bool TlsClient::connect_gost_only(const ParsedUrl& url, TlsConnection& out, std::string& error) {
+#ifndef GCI_GOST_ENABLED
+    error = "GOST provider not compiled in";
+    return false;
+#else
+    if (!gost_provider_loaded()) {
+        error = "GOST provider not loaded";
+        return false;
+    }
+
+    ensure_gost_provider();
+
+    out.ctx.reset(SSL_CTX_new(TLS_client_method()));
+    if (!out.ctx) {
+        error = "SSL_CTX_new failed: " + openssl_last_error();
+        return false;
+    }
+
+    SSL_CTX_set_min_proto_version(out.ctx.get(), TLS1_2_VERSION);
+    SSL_CTX_set_max_proto_version(out.ctx.get(), TLS1_3_VERSION);
+    SSL_CTX_set_options(out.ctx.get(),
+        SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_COMPRESSION);
+
+    // ТОЛЬКО ГОСТ-шифры — чтобы сервер выбрал именно ГОСТ-сертификат
+    SSL_CTX_set_cipher_list(out.ctx.get(),
+        "GOST2012-GOST8912-GOST8912:GOST2001-GOST89-GOST89");
+    SSL_CTX_set_ciphersuites(out.ctx.get(),
+        "TLS_GOSTR341112_256_WITH_KUZNYECHIK_CTR_OMAC"
+        ":TLS_GOSTR341112_256_WITH_MAGMA_CTR_OMAC"
+        ":TLS_GOSTR341112_256_WITH_KUZNYECHIK_MGM_L"
+        ":TLS_GOSTR341112_256_WITH_MAGMA_MGM_L"
+        ":TLS_GOSTR341112_256_WITH_KUZNYECHIK_MGM_S"
+        ":TLS_GOSTR341112_256_WITH_MAGMA_MGM_S");
+
+    SSL_CTX_set_verify(out.ctx.get(), SSL_VERIFY_PEER,
+        [](int, X509_STORE_CTX*) -> int { return 1; });
+
+    if (!load_trust_store(out.ctx.get(), error)) {
+        return false;
+    }
+
+    std::ostringstream hp;
+    hp << url.host << ":" << url.port;
+    out.bio.reset(BIO_new_ssl_connect(out.ctx.get()));
+    if (!out.bio) {
+        error = "BIO_new_ssl_connect failed: " + openssl_last_error();
+        return false;
+    }
+    BIO_set_conn_hostname(out.bio.get(), hp.str().c_str());
+
+    SSL* raw_ssl = nullptr;
+    BIO_get_ssl(out.bio.get(), &raw_ssl);
+    if (!raw_ssl) {
+        error = "BIO_get_ssl failed";
+        return false;
+    }
+    SSL_set_mode(raw_ssl, SSL_MODE_AUTO_RETRY);
+
+    if (SSL_set_tlsext_host_name(raw_ssl, url.host.c_str()) != 1) {
+        error = "SNI set failed: " + openssl_last_error();
+        return false;
+    }
+    SSL_set1_host(raw_ssl, url.host.c_str());
+
+    if (BIO_do_connect(out.bio.get()) <= 0) {
+        error = "TCP connect (GOST) failed: " + openssl_last_error();
+        return false;
+    }
+    if (BIO_do_handshake(out.bio.get()) <= 0) {
+        error = "TLS handshake (GOST) failed: " + openssl_last_error();
+        return false;
+    }
+
+    out.negotiated_version = tls_version_name(raw_ssl);
+    if (const char* c = SSL_get_cipher_name(raw_ssl)) out.negotiated_cipher = c;
+    out.verify_result = SSL_get_verify_result(raw_ssl);
+    return true;
+#endif
+}
+
 }  // namespace gci

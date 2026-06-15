@@ -63,6 +63,15 @@ public:
                  TlsConnection& out,
                  std::string& error);
 
+    /**
+     * Пытается подключиться используя ТОЛЬКО ГОСТ-шифры.
+     * Если ГОСТ провайдер не загружен или сервер не поддерживает ГОСТ —
+     * возвращает false. Используется для стратегии "ГОСТ first".
+     */
+    bool connect_gost_only(const ParsedUrl& url,
+                           TlsConnection& out,
+                           std::string& error);
+
 private:
     std::string trust_store_path_;
     int         timeout_ms_;
