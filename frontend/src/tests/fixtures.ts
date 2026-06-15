@@ -1,6 +1,5 @@
 import type { InspectResult } from '@/types/site';
 
-/** Полная DTO-fixture для тестов компонентов. */
 export const mockResult: InspectResult = {
   requestId: 'rid-test',
   inputUrl: 'https://gosuslugi.ru/',

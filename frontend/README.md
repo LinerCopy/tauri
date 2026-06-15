@@ -6,21 +6,21 @@ Vue 3 + TypeScript + Vite UI, отрисовываемый Tauri WebView на An
 
 ```bash
 npm install
-npm run dev      # Vite dev server (используется Tauri через beforeDevCommand)
-npm run build    # типы + сборка → dist/
-npm run test     # Vitest
-npm run test:cov # покрытие
+npm run dev
+npm run build
+npm run test
+npm run test:cov
 ```
 
 ## Структура
 
 ```
 src/
-  components/       # презентационные компоненты
+  components/       # компоненты
   composables/      # useCheckSite (вызов Tauri-команды)
   router/           # Vue Router (hash-history)
   types/            # DTO + список известных сайтов
-  views/            # HomeView / ResultView
+  views/            # экраны
   App.vue, main.ts  # точка входа
 tests/              # Vitest
 ```

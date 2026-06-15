@@ -158,7 +158,7 @@ jobs:
           OPENSSL_INCLUDE_DIR: ${{ github.workspace }}/third_party/openssl/install/android-arm64/include
           GOST_ENGINE_ROOT: ${{ github.workspace }}/third_party/gost-engine/install/android-arm64
         run: >
-          cargo tauri android build --apk --target aarch64
+          cargo tauri android build --debug --apk --target aarch64
           --config '{"build":{"beforeBuildCommand":"","beforeDevCommand":""}}'
 
       - name: Upload APK (C++ core)

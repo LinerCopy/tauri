@@ -20,7 +20,6 @@ describe('CertificateCard', () => {
     expect(text).toContain('AA11BB22CC33DD44');
     expect(text).toContain('УЦ Минцифры: да');
 
-    // Все 4 проверки .ok
     const okItems = wrapper.findAll('.checks li.ok');
     expect(okItems).toHaveLength(4);
   });

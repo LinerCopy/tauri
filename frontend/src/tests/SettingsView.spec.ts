@@ -77,18 +77,14 @@ function setupInvoke() {
 describe('SettingsView', () => {
   beforeEach(() => {
     routerPush.mockReset();
-    // Clear localStorage so persisted last-check doesn't leak between tests.
     try {
       localStorage.clear();
-    } catch {
-      /* jsdom may not always have localStorage; ignore */
-    }
-    // Stub clipboard so copy buttons work in jsdom.
+    } catch {}
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: { writeText: vi.fn().mockResolvedValue(undefined) },
     });
-    // window.open used by source link card.
+
     vi.spyOn(window, 'open').mockImplementation(() => null);
   });
 
@@ -145,7 +141,6 @@ describe('SettingsView', () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
 
-    // initial load = 2 invocations (trust_store_info + core_version)
     expect(fn).toHaveBeenCalledTimes(2);
 
     const updateBtn = wrapper
@@ -155,7 +150,6 @@ describe('SettingsView', () => {
     await updateBtn!.trigger('click');
     await flushPromises();
 
-    // +1 check_trust_store_updates, +2 trust_store_info & core_version refresh
     expect(fn).toHaveBeenCalledTimes(5);
     expect(wrapper.html()).toContain('Последняя проверка');
     expect(wrapper.html()).toContain('Сертификаты актуальны');
@@ -172,7 +166,6 @@ describe('SettingsView', () => {
     await flushPromises();
     expect(first.html()).toContain('Последняя проверка');
 
-    // Remount — last check date must still be displayed without clicking again.
     first.unmount();
     const second = mount(SettingsView);
     await flushPromises();

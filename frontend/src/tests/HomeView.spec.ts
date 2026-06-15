@@ -8,9 +8,6 @@ vi.mock('vue-router', () => ({
   useRouter: () => ({ push: routerPush }),
 }));
 
-// useCheckSite — лёгкая заглушка, без сети. Возвращаем настоящие Ref-ы,
-// иначе Vue не распакует их при автогенерации шаблонных биндингов и
-// :disabled="loading" получит объект вместо boolean.
 vi.mock('@/composables/useCheckSite', () => ({
   useCheckSite: () => ({
     loading: ref(false),

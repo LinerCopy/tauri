@@ -127,7 +127,7 @@ export OPENSSL_LIB_DIR=$PWD/../third_party/openssl/install/android-arm64/lib
 export OPENSSL_INCLUDE_DIR=$PWD/../third_party/openssl/install/android-arm64/include
 export OPENSSL_ROOT_DIR=$PWD/../third_party/openssl/install/android-arm64
 
-cargo tauri android dev       # запуск на подключённом устройстве/эмуляторе
+cargo tauri android dev
 cargo tauri android build --apk
 ```
 
@@ -137,7 +137,7 @@ ABI выбираются через `tauri.conf.json` → `app.android.archs`.
 
 ```bash
 cd src-tauri
-cargo tauri ios init          # требует Xcode + cocoapods
+cargo tauri ios init
 export OPENSSL_LIB_DIR=$PWD/../third_party/openssl/install/ios-arm64/lib
 export OPENSSL_INCLUDE_DIR=$PWD/../third_party/openssl/install/ios-arm64/include
 export OPENSSL_ROOT_DIR=$PWD/../third_party/openssl/install/ios-arm64

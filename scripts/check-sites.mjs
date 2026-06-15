@@ -2,15 +2,7 @@
 /**
  * check-sites.mjs — Node CLI, который реально подключается к указанным
  * сайтам по TLS, парсит peer-сертификат и цепочку, делает HTTP GET и
- * формирует JSON-отчёт, СТРОГО соответствующий контракту C++ ядра
- * (см. docs/api.md). Полезен как:
- *
- *   1) дымовой тест контракта без мобильной сборки;
- *   2) генератор реальных данных для отчёта заказчику;
- *   3) офлайн-валидация определения "Минцифры / не Минцифры"
- *      по реальным сертификатам с гос-сайтов.
- *
- * Зависимости: только встроенные Node-модули (tls, https, fs, path, url).
+ * формирует JSON-отчёт.
  *
  * Примеры:
  *   node scripts/check-sites.mjs                       # стандартный набор
@@ -37,7 +29,6 @@ const DEFAULT_SITES = [
 const MAX_HTML_BYTES = 1024 * 1024;
 const TIMEOUT_MS = 15_000;
 
-// --------- CLI args ---------
 const args = process.argv.slice(2);
 const flags = new Set(args.filter((a) => a.startsWith('-')));
 const positional = args.filter((a) => !a.startsWith('-') && !a.startsWith('out='));
@@ -47,7 +38,6 @@ const loadHtml = !flags.has('--no-html');
 const quiet = flags.has('--quiet');
 const sites = positional.length ? positional : DEFAULT_SITES;
 
-// --------- Helpers ---------
 const C = {
   reset: '\x1b[0m', bold: '\x1b[1m',
   green: '\x1b[32m', red: '\x1b[31m', yellow: '\x1b[33m',
@@ -66,7 +56,6 @@ const MINCIFRY_MARKERS = [
 
 function nameToString(n) {
   if (!n) return '';
-  // Node даёт name как объект {CN, O, OU, C, ...} либо как строку.
   if (typeof n === 'string') return n;
   return Object.entries(n)
     .filter(([k]) => !['subjectaltname'].includes(k.toLowerCase()))
@@ -76,7 +65,6 @@ function nameToString(n) {
 
 function asn1HexSerial(serial) {
   if (!serial) return '';
-  // Node возвращает hex-строку или Buffer
   if (Buffer.isBuffer(serial)) return serial.toString('hex').toUpperCase();
   return String(serial).toUpperCase();
 }
@@ -88,7 +76,6 @@ function isoDate(s) {
 }
 
 function fingerprint(cert) {
-  // Node предоставляет fingerprint256: "AA:BB:..." — нормализуем к плоскому hex.
   return (cert.fingerprint256 || '').replace(/:/g, '').toUpperCase();
 }
 
@@ -113,7 +100,6 @@ function buildChain(rootCert) {
     seen.add(fingerprint(cur));
     out.push(cur);
     cur = cur.issuerCertificate;
-    // Самоподписанный root: issuerCertificate ссылается на сам себя.
     if (cur && fingerprint(cur) === fingerprint(out[out.length - 1])) break;
   }
   return out;
@@ -148,7 +134,6 @@ function makeChainDto(cert) {
 
 function checkHostname(cert, host) {
   try {
-    // tls.checkServerIdentity возвращает undefined при успехе и Error при провале.
     return tls.checkServerIdentity(host, cert) === undefined;
   } catch {
     return false;
@@ -162,7 +147,6 @@ function notExpired(cert) {
   return Number.isFinite(from) && Number.isFinite(to) && from <= now && now <= to;
 }
 
-// --------- Network ---------
 function fetchTlsAndHtml(urlStr) {
   return new Promise((resolve) => {
     let parsed;
@@ -193,8 +177,6 @@ function fetchTlsAndHtml(urlStr) {
       },
       minVersion: 'TLSv1.2',
       maxVersion: 'TLSv1.3',
-      // Используем дефолтное системное доверие, а проверку
-      // "Минцифры" делаем уже по разобранной цепочке.
       rejectUnauthorized: false,
       timeout: TIMEOUT_MS,
     };
@@ -282,7 +264,6 @@ function buildReport(urlStr, raw) {
   const expired_ok = endEntity ? notExpired(endEntity) : false;
   const chain_ok = !!raw.authorized;
 
-  // is_mintsifry_ca: ищем маркеры в issuer end-entity и в subjects дальнейшей цепочки.
   let mincifry = false;
   if (endEntity) {
     if (isMincifryName(nameToString(endEntity.issuer))) mincifry = true;
@@ -331,7 +312,6 @@ function tryHost(urlStr) {
   try { return new URL(urlStr).host; } catch { return ''; }
 }
 
-// --------- Pretty print ---------
 function printReport(r) {
   const v = r.validation;
   const flag = (b) => (b ? c('green', '✔') : c('red', '✘'));
@@ -376,7 +356,6 @@ function printSummary(reports) {
   }
 }
 
-// --------- Main ---------
 (async () => {
   if (flags.has('-h') || flags.has('--help')) {
     console.log(`Usage: node scripts/check-sites.mjs [URL...] [--no-html] [--quiet] [--out=DIR]

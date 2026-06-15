@@ -1,8 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Эти тесты обходят глобальный mock `@/lib/invokeBackend` и берут реальный
-// mockBackend, чтобы проверить, что демо-режим корректно отвечает на
-// trust_store_info и save_report.
 vi.unmock('@/lib/invokeBackend');
 
 describe('mockBackend', () => {

@@ -19,7 +19,6 @@ describe('SiteSelector', () => {
     await wrapper.findAll('.chip')[0].trigger('click');
     expect(wrapper.emitted('update:modelValue')?.[0]?.[0]).toBe(KNOWN_SITES[0].url);
 
-    // После выбора кнопка submit активна
     await wrapper.setProps({ modelValue: KNOWN_SITES[0].url });
     await wrapper.find('button.primary').trigger('click');
     expect(wrapper.emitted('submit')).toBeTruthy();

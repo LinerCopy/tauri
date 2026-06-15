@@ -54,5 +54,5 @@ DerivedData/
 *.log
 tmp/
 
-# CLI отчёты (генерируются scripts/check-sites.mjs --out=reports/)
+# CLI отчёты
 reports/

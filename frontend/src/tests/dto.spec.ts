@@ -2,10 +2,6 @@ import { describe, it, expect } from 'vitest';
 import type { InspectResult } from '@/types/site';
 import { mockResult } from './fixtures';
 
-/**
- * Тесты DTO-маппинга: проверяют, что контракт от ядра успешно парсится
- * в типы фронтенда без потерь и что snake_case флаги валидации сохраняются.
- */
 describe('DTO mapping', () => {
   it('round-trips through JSON without losing fields', () => {
     const json = JSON.stringify(mockResult);
