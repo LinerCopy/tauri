@@ -10,10 +10,10 @@
 namespace gci {
 
 struct ParsedUrl {
-    std::string scheme;   // ожидается "https"
-    std::string host;     // hostname без порта
+    std::string scheme;
+    std::string host;
     uint16_t    port{443};
-    std::string path;     // включая query, начиная с "/"
+    std::string path;
 };
 
 bool parse_url(const std::string& url, ParsedUrl& out, std::string& error);
